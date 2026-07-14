@@ -73,7 +73,7 @@ PART
 	link = shockConeIntake_4292995753
 	link = shockConeIntake_4292995616
 	link = GearLarge_4292994109
-	link = dockingPortShielded_4292993698
+	link = dockingPort1_4292993698
 	link = kOSMachineRad_4292993561
 	link = longAntenna_4292992465
 	link = longAntenna_4292992328
@@ -1659,7 +1659,7 @@ PART
 }
 PART
 {
-	part = dockingPortShielded_4292993698
+	part = dockingPort1_4292993698
 	partName = Part
 	pos = 0.0,1.875,-6.875
 	attPos = 0,0,0

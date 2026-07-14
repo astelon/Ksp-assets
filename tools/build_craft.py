@@ -187,7 +187,9 @@ for side in (+1, -1):
 # 6. DOCKING, POWER, COMMS, RCS, CONTROL
 # ===========================================================================
 # 6a. Shielded docking port on the dorsal spine, facing up (+Y) - station docking.
-dock = add("dockingPortShielded", (0.0, FUSE_R, round(bay1.pos[2], 4)), IDENT)
+# NOTE: the stock cfg folder is "dockingPortShielded" but the part's internal
+# `name` (what .craft files must reference) is "dockingPort1".
+dock = add("dockingPort1", (0.0, FUSE_R, round(bay1.pos[2], 4)), IDENT)
 dock.attach_srf(bay1)
 
 # 6b. kOS scriptable control unit (radial), on the spine behind the cockpit.
