@@ -22,7 +22,7 @@ by hand** in the SPH, and so you know exactly what every part is.
 | 2 | Big-S Spaceplane Tail Fin | `wingShuttleRudder` |
 | 1 | Advanced Reaction Wheel Module, Large | `asasmodule1-2` |
 | 3 | LY-60 Landing Gear | `GearLarge` |
-| 1 | Clamp-O-Tron Shielded Docking Port | `dockingPortShielded` |
+| 1 | Clamp-O-Tron Shielded Docking Port | `dockingPort1` |
 | 1 | kOS Radial Processor (mod) | `kOSMachineRad` |
 | 4 | PB-NUK Radioisotope Generator | `rtg` |
 | 2 | Z-4K Rechargeable Battery Bank | `batteryBankLarge` |
