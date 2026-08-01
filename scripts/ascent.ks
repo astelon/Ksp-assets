@@ -84,6 +84,20 @@ SET ABORT_IF_INFEASIBLE TO FALSE.   // TRUE = cut the burn the moment orbit is
                                     // for a return); FALSE = keep flying to the
                                     // hard floors, which never burn dry either
 
+// --- Pre-flight feasibility model -------------------------------------------
+//  A go/no-go check run on the runway, before the ship has spent anything.  It
+//  models the flight as: jets take the ship to a handover state, then the
+//  rocket does the rest.  The handover assumptions below are what a healthy
+//  RAPIER spaceplane achieves on Kerbin; the script prints the *actual* values
+//  at the real mode switch so you can calibrate them for your airframe.
+SET PLAN_SWITCH_ALT  TO 20000.      // assumed altitude at the mode switch (m)
+SET PLAN_SWITCH_SPD  TO 1450.       // ... and surface speed there (m/s)
+SET PLAN_JET_DV      TO 3000.       // jet-phase dV equivalent, incl. drag (m/s)
+SET PLAN_LOSS_FACTOR TO 1.50.       // gravity/drag/steering losses, rocket climb
+SET PLAN_TWR_MIN     TO 1.05.       // closed-cycle TWR wanted at the handover
+SET PLAN_JET_ISP     TO 3200.       // air-breathing Isp if it cannot be read (s)
+SET PREFLIGHT_HOLD   TO 12.         // pause this long on a failed check (s)
+
 // --- Attitude controller (shared by both powered phases) --------------------
 SET AOA_KI       TO 0.30.           // trim gain, deg of trim per deg of error per s
 SET AOA_TRIM_MAX TO 14.             // trim authority clamp (deg)
@@ -339,6 +353,25 @@ FUNCTION measureRocketIsp {
   RETURN ROCKET_ISP_FALLBACK.
 }
 
+// Isp of the engines in whatever mode they are in *now*, at the current
+// ambient pressure.  Used to read the jet Isp on the runway, and to work out
+// how much of the closed-cycle thrust the sea-level pressure is eating.
+FUNCTION measureCurrentIsp {
+  LOCAL engs IS LIST().
+  LIST ENGINES IN engs.
+  LOCAL wsum IS 0.
+  LOCAL isum IS 0.
+  FOR eng IN engs {
+    LOCAL thr IS eng:MAXTHRUST.
+    IF thr > 0 AND eng:ISP > 0 {
+      SET wsum TO wsum + thr.
+      SET isum TO isum + thr * eng:ISP.
+    }
+  }
+  IF wsum > 0 { RETURN isum / wsum. }
+  RETURN 0.
+}
+
 // Propellant mass (t) the closed-cycle engines can actually burn: our LF and Ox
 // only, and only in 9:11 pairs, so a lopsided tank state is not counted as dV.
 FUNCTION rocketPropMass {
@@ -433,6 +466,29 @@ FUNCTION dvToRaiseApTo {
   RETURN MAX(0, vNeed - SHIP:VELOCITY:ORBIT:MAG).
 }
 
+// The same two questions asked about an *assumed* state rather than the live
+// one, so the mission can be priced on the runway.  dvRaiseApFrom is the
+// impulsive cost of stretching the orbit out to apAlt from (altM, spd);
+// circDvFrom is the burn waiting at the far end of that transfer.
+FUNCTION dvRaiseApFrom {
+  PARAMETER altM, spd, apAlt.
+  LOCAL rHere IS BODY_R + altM.
+  LOCAL rTgt  IS BODY_R + apAlt.
+  IF rTgt <= rHere { RETURN 0. }
+  LOCAL smaT IS (rHere + rTgt) / 2.
+  RETURN MAX(0, SQRT(BODY_MU * (2 / rHere - 1 / smaT)) - spd).
+}
+
+FUNCTION circDvFrom {
+  PARAMETER altM, apAlt.
+  LOCAL rA IS BODY_R + apAlt.
+  LOCAL sma IS (rA + BODY_R + altM) / 2.
+  IF sma <= 0 OR rA <= 0 { RETURN 0. }
+  LOCAL term IS 2 / rA - 1 / sma.
+  IF term <= 0 { RETURN 0. }
+  RETURN MAX(0, vCircAt(apAlt) - SQRT(BODY_MU * term)).
+}
+
 // Full price of an orbit at apAlt: the climb, the circularisation, and the fuel
 // that must survive both.  Only the *climb* is scaled by the loss factor - it
 // is the part flown against drag and gravity inside the atmosphere.  The
@@ -457,6 +513,141 @@ FUNCTION affordableAp {
     IF priceOfOrbit(mid, lossFactor) <= dvHave { SET lo TO mid. } ELSE { SET hi TO mid. }
   }
   RETURN lo.
+}
+
+// ---------------------------------------------------------------------------
+//  Pre-flight feasibility  --  can this ship afford the mission at all?
+// ---------------------------------------------------------------------------
+//  The question a launch autopilot cannot answer once it is airborne, and the
+//  one that matters while the ship is still being designed: is there enough dV
+//  aboard, and if not, how much more of what?
+//
+//  The model is deliberately explicit about the two things that make a
+//  spaceplane different from a rocket:
+//
+//   * The jets burn liquid fuel the rocket phase would otherwise have.  Simply
+//     counting every paired LF/Ox unit in the tanks - which is what the ΔV
+//     figure on the pad reports - badly overstates what will be left when the
+//     RAPIERs switch over.  So the model burns the jet phase first, then prices
+//     the rocket phase against what survives.
+//   * Adding propellant is not free.  Tanks have structure, so x tonnes of
+//     propellant costs x(1+k) tonnes on the runway, where k is measured from
+//     this ship's own tanks.  That is why the answer to "how much more fuel?"
+//     is not linear, and why there is a hard ceiling: as tanks are added the
+//     mass ratio tends to (1+k)/k and no amount of fuel gets past it.  A design
+//     that needs more than that ceiling cannot be fixed with fuel at all.
+// ---------------------------------------------------------------------------
+// The LF share of a balanced LF/Ox load.  LF and Ox share a density, so mass
+// ratios equal unit ratios.
+SET LF_FRAC TO LFO_LF_RATIO / (LFO_LF_RATIO + LFO_OX_RATIO).
+SET OX_FRAC TO 1 - LF_FRAC.
+
+// Fraction of launch mass the jets consume as liquid fuel, from the rocket
+// equation at air-breathing Isp over the jet phase's dV equivalent.
+FUNCTION jetBurnFraction {
+  PARAMETER jetIsp.
+  RETURN 1 - CONSTANT:E ^ (-PLAN_JET_DV / (jetIsp * G0)).
+}
+
+//  All three take the upgrade as a split (addLf, addOx, addDry) rather than a
+//  single propellant figure: topping up liquid fuel alone is a different - and
+//  often much cheaper - fix from adding balanced LF/Ox, and the jets can only
+//  ever drink the LF.
+FUNCTION padMassWith {              // launch mass with an upgrade fitted
+  PARAMETER addLf, addOx, addDry.
+  RETURN launchMass + (addLf + addOx) * (1 + TANK_K) + addDry.
+}
+
+FUNCTION jetBurnWith {              // tonnes of LF the jets eat, upgrade fitted
+  PARAMETER addLf, addOx, addDry.
+  RETURN MIN(padMassWith(addLf, addOx, addDry) * JET_FRAC, lfMass0 + addLf).
+}
+
+FUNCTION handoverMass {
+  PARAMETER addLf, addOx, addDry.
+  RETURN padMassWith(addLf, addOx, addDry) - jetBurnWith(addLf, addOx, addDry).
+}
+
+// Rocket dV left at the handover, with addLf / addOx tonnes of extra
+// propellant and addDry tonnes of extra dry mass (engines) fitted.  addDry may
+// be negative, to ask what shedding payload would buy.
+FUNCTION dvHandoverSplit {
+  PARAMETER addLf, addOx, addDry.
+  LOCAL lfLeft IS lfMass0 + addLf - jetBurnWith(addLf, addOx, addDry).
+  LOCAL oxLeft IS oxMass0 + addOx.
+  LOCAL lfUse IS MIN(lfLeft, oxLeft * LFO_LF_RATIO / LFO_OX_RATIO).
+  IF lfUse <= 0 { RETURN 0. }
+  LOCAL prop IS lfUse * (LFO_LF_RATIO + LFO_OX_RATIO) / LFO_LF_RATIO.
+  LOCAL mH IS handoverMass(addLf, addOx, addDry).
+  IF mH <= prop { RETURN 0. }
+  RETURN RKT_ISP * G0 * LN(mH / (mH - prop)).
+}
+
+FUNCTION dvAtHandover {             // ... adding a balanced LF/Ox load
+  PARAMETER addProp, addDry.
+  RETURN dvHandoverSplit(addProp * LF_FRAC, addProp * OX_FRAC, addDry).
+}
+
+// How much liquid fuel is left over once the oxidiser is fully paired off -
+// i.e. the LF-only reserve the jets are meant to run on.  Negative means the
+// air-breathing phase is eating fuel the rocket phase was counting on, which
+// is the single most common way an otherwise sound SSTO comes up short.
+FUNCTION lfSurplusWith {
+  PARAMETER addLf.
+  RETURN (lfMass0 + addLf - jetBurnWith(addLf, 0, 0)) -
+         oxMass0 * LFO_LF_RATIO / LFO_OX_RATIO.
+}
+
+// Smallest LF-only top-up (t) that stops the jets eating paired propellant.
+FUNCTION solveLfTopUp {
+  IF lfSurplusWith(0) >= 0 { RETURN 0. }
+  LOCAL hi IS 1.
+  UNTIL lfSurplusWith(hi) >= 0 OR hi > 20000 { SET hi TO hi * 2. }
+  IF hi > 20000 { RETURN -1. }
+  LOCAL lo IS 0.
+  FROM { LOCAL iter IS 0. } UNTIL iter >= 24 STEP { SET iter TO iter + 1. } DO {
+    LOCAL mid IS (lo + hi) / 2.
+    IF lfSurplusWith(mid) >= 0 { SET hi TO mid. } ELSE { SET lo TO mid. }
+  }
+  RETURN hi.
+}
+
+// Tonnes of propellant that must be added to reach dvNeed at the handover.
+// -1 means no amount will do it: the mass ratio ceiling is in the way.
+FUNCTION solveProp {
+  PARAMETER dvNeed, addDry.
+  IF dvAtHandover(0, addDry) >= dvNeed { RETURN 0. }
+  LOCAL hi IS 1.
+  UNTIL dvAtHandover(hi, addDry) >= dvNeed OR hi > 20000 { SET hi TO hi * 2. }
+  IF hi > 20000 { RETURN -1. }
+  LOCAL lo IS 0.
+  FROM { LOCAL iter IS 0. } UNTIL iter >= 24 STEP { SET iter TO iter + 1. } DO {
+    LOCAL mid IS (lo + hi) / 2.
+    IF dvAtHandover(mid, addDry) >= dvNeed { SET hi TO mid. } ELSE { SET lo TO mid. }
+  }
+  RETURN hi.
+}
+
+// Tonnes of payload that would have to come off instead.  -1 if even flying
+// empty would not close the gap.
+FUNCTION solveMassCut {
+  PARAMETER dvNeed.
+  IF dvAtHandover(0, 0) >= dvNeed { RETURN 0. }
+  LOCAL hi IS payloadMass.
+  IF hi <= 0 OR dvAtHandover(0, -hi) < dvNeed { RETURN -1. }
+  LOCAL lo IS 0.
+  FROM { LOCAL iter IS 0. } UNTIL iter >= 24 STEP { SET iter TO iter + 1. } DO {
+    LOCAL mid IS (lo + hi) / 2.
+    IF dvAtHandover(0, -mid) >= dvNeed { SET hi TO mid. } ELSE { SET lo TO mid. }
+  }
+  RETURN hi.
+}
+
+FUNCTION twrAtHandover {
+  PARAMETER addProp, addDry, addEng.
+  LOCAL gSw IS BODY_MU / ((BODY_R + PLAN_SWITCH_ALT) * (BODY_R + PLAN_SWITCH_ALT)).
+  LOCAL thr IS ccThrustVac * (engCount + addEng) / MAX(1, engCount).
+  RETURN thr / (handoverMass(addProp * LF_FRAC, addProp * OX_FRAC, addDry) * gSw).
 }
 
 // ---------------------------------------------------------------------------
@@ -580,10 +771,8 @@ IF ISOLATE_PAYLOAD {
   }
 }
 
-PRINT "Ignition. RAPIERs to air-breathing.".
+PRINT "Ignition (throttle closed - measuring both engine modes).".
 igniteEngines().
-setRapierMode(FALSE).               // ensure air-breathing for takeoff
-SET thrCmd TO 1.
 WAIT 1.
 IF SHIP:AVAILABLETHRUST < 1 {
   // Falling back to STAGE is only safe with nothing to drop.  With a payload on
@@ -600,33 +789,206 @@ IF SHIP:AVAILABLETHRUST < 1 {
   }
 }
 
+// --- measure both engine modes, with the throttle shut ----------------------
+//  The RAPIER reports the Isp and thrust of whichever mode it is *in*, so the
+//  only way to budget a closed-cycle burn from the runway is to look.  At zero
+//  throttle on the brakes this costs nothing and moves nothing.
+setRapierMode(TRUE).
+WAIT 0.6.
+SET ccThrustAsl TO SHIP:AVAILABLETHRUST.
+SET RKT_ISP     TO measureRocketIsp().
+SET RKT_ISP_ASL TO measureCurrentIsp().
+setRapierMode(FALSE).               // back to air-breathing for takeoff
+WAIT 0.6.
+SET jetThrust TO SHIP:AVAILABLETHRUST.
+SET JET_ISP   TO measureCurrentIsp().
+IF JET_ISP < 500 OR JET_ISP > 20000 { SET JET_ISP TO PLAN_JET_ISP. }
+
+// Thrust quoted at sea level is throttled by ambient pressure; at the handover
+// the engines are effectively in vacuum, so scale by the Isp ratio.
+SET ccThrustVac TO ccThrustAsl.
+IF RKT_ISP_ASL > 0 { SET ccThrustVac TO ccThrustAsl * RKT_ISP / RKT_ISP_ASL. }
+
 SET launchMass TO SHIP:MASS.
-SET jetThrust  TO SHIP:AVAILABLETHRUST.
-SET jetTwr     TO twrNow().
-SET dvAtPad    TO rocketDv().       // closed-cycle dV sitting in *our* tanks
-SET planCirc   TO circDvAt(REQUESTED_APOAPSIS).
-SET planDeorb  TO deorbitDvFrom(REQUESTED_APOAPSIS).
+SET jetTwr     TO jetThrust / MAX(0.001, weightKN()).
+SET ROT_BONUS  TO SHIP:VELOCITY:ORBIT:MAG * SIN(LAUNCH_HEADING).
+SET lfMass0    TO coreResAmt("LiquidFuel") * LF_DENS.
+SET oxMass0    TO coreResAmt("Oxidizer") * OX_DENS.
+SET JET_FRAC   TO jetBurnFraction(JET_ISP).
+
+// Payload mass, and the structural cost of this ship's own tankage: tonnes of
+// tank dry mass per tonne of propellant it can hold.  Measured, not assumed -
+// wet wings and Mk3 fuselages are not the same deal as a plain tank.
+SET payloadMass TO 0.
+FOR prt IN SHIP:PARTS {
+  IF NOT CORE_UIDS:HASKEY(prt:UID) { SET payloadMass TO payloadMass + prt:MASS. }
+}
+SET tankDry TO 0.
+SET tankCap TO 0.
+FOR prt IN CORE_TANKS {
+  SET tankDry TO tankDry + prt:DRYMASS.
+  FOR res IN prt:RESOURCES {
+    IF res:NAME = "LiquidFuel" { SET tankCap TO tankCap + res:CAPACITY * LF_DENS. }
+    IF res:NAME = "Oxidizer"   { SET tankCap TO tankCap + res:CAPACITY * OX_DENS. }
+  }
+}
+SET TANK_K TO 0.125.                // stock LF/Ox tanks: 8 t of fuel per t of dry
+IF tankCap > 0 { SET TANK_K TO tankDry / tankCap. }
+
+SET engCount TO 0.
+SET engMass  TO 0.
+SET allEngs  TO LIST().
+LIST ENGINES IN allEngs.
+FOR eng IN allEngs {
+  IF eng:MULTIMODE { SET engCount TO engCount + 1. SET engMass TO engMass + eng:MASS. }
+}
+SET engMassEach TO 2.
+IF engCount > 0 { SET engMassEach TO engMass / engCount. }
 
 PRINT "------------------------------------------------------".
 PRINT "VEHICLE".
-PRINT "  Mass         : " + ROUND(launchMass, 1) + " t  (dry " + ROUND(SHIP:DRYMASS, 1) + " t)".
-PRINT "  Weight       : " + ROUND(weightKN()) + " kN".
-PRINT "  Thrust (jet) : " + ROUND(jetThrust) + " kN    TWR " + ROUND(jetTwr, 2).
-PRINT "  Usable dV    : " + ROUND(dvAtPad) + " m/s  (Isp " + ROUND(RKT_ISP) +
-      " s assumed until the mode switch)".
-PRINT "BUDGET for a " + ROUND(REQUESTED_APOAPSIS / 1000) + " km orbit".
-PRINT "  Circularise  : ~" + ROUND(planCirc) + " m/s".
-PRINT "  Deorbit to " + ROUND(DEORBIT_PE / 1000) + " km : ~" + ROUND(planDeorb) + " m/s".
-PRINT "  Margin       : " + ROUND(DV_MARGIN) + " m/s".
-PRINT "  => RESERVED  : " + ROUND(planCirc + planDeorb + DV_MARGIN) +
-      " m/s, leaving " + ROUND(dvAtPad - planCirc - planDeorb - DV_MARGIN) +
-      " m/s for the climb".
+PRINT "  Mass         : " + ROUND(launchMass, 1) + " t  (dry " + ROUND(SHIP:DRYMASS, 1) +
+      " t, payload " + ROUND(payloadMass, 1) + " t)".
+PRINT "  Jet mode     : " + ROUND(jetThrust) + " kN, Isp " + ROUND(JET_ISP) +
+      " s, TWR " + ROUND(jetTwr, 2).
+PRINT "  Closed cycle : " + ROUND(ccThrustVac) + " kN (vac), Isp " + ROUND(RKT_ISP) +
+      " s, " + engCount + " RAPIER(s)".
+PRINT "  Tankage      : " + ROUND(1 / MAX(0.001, TANK_K), 1) +
+      " t of propellant per t of tank structure".
 IF jetTwr < 0.35 { PRINT "  !! Low take-off TWR - expect a long roll.". }
-IF dvAtPad < planCirc + planDeorb + DV_MARGIN {
-  PRINT "  !! The tanks do not even cover circ + deorbit. Expect to settle low.".
+
+// ---------------------------------------------------------------------------
+//  FEASIBILITY CHECK
+// ---------------------------------------------------------------------------
+SET planSwSpd  TO PLAN_SWITCH_SPD + ROT_BONUS.        // orbital speed at handover
+SET planClimb  TO dvRaiseApFrom(PLAN_SWITCH_ALT, planSwSpd, REQUESTED_APOAPSIS).
+SET planCirc   TO circDvFrom(PLAN_SWITCH_ALT, REQUESTED_APOAPSIS).
+SET planDeorb  TO deorbitDvFrom(REQUESTED_APOAPSIS).
+SET dvRequired TO planClimb * PLAN_LOSS_FACTOR + planCirc + planDeorb + DV_MARGIN.
+SET dvAtPad    TO rocketDv().                         // every paired unit aboard
+SET dvHandover TO dvAtHandover(0, 0).                 // what survives the jets
+SET jetLfPlan  TO jetBurnWith(0, 0, 0).
+SET lfSpare    TO lfMass0 - oxMass0 * LFO_LF_RATIO / LFO_OX_RATIO.
+
+PRINT "FEASIBILITY for a " + ROUND(REQUESTED_APOAPSIS / 1000) + " km orbit".
+PRINT "  Assumes handover at " + ROUND(PLAN_SWITCH_ALT / 1000, 1) + " km / " +
+      ROUND(PLAN_SWITCH_SPD) + " m/s after ~" + ROUND(PLAN_JET_DV) + " m/s of jet dV,".
+PRINT "  and x" + ROUND(PLAN_LOSS_FACTOR, 2) + " losses on the rocket climb.".
+PRINT "  JETS  burn ~" + ROUND(jetLfPlan, 1) + " t of LF (" +
+      ROUND(jetLfPlan / LF_DENS) + " units); LF-only reserve is " +
+      ROUND(MAX(0, lfSpare) / LF_DENS) + " units.".
+IF lfSpare < 0 {
+  // More oxidiser aboard than the liquid fuel can ever pair with.  Every one
+  // of those units is mass carried to orbit and back for nothing.
+  SET deadOx TO -lfSpare * LFO_OX_RATIO / LFO_LF_RATIO.       // tonnes
+  PRINT "        !! " + ROUND(deadOx / OX_DENS) + " units of oxidizer (" +
+        ROUND(deadOx, 1) + " t) can never be burned - there is not".
+  PRINT "           enough LF to pair with it. Dead mass; drain or rebalance it.".
+}
+IF lfSpare < jetLfPlan {
+  PRINT "        !! The jets will eat " + ROUND((jetLfPlan - MAX(0, lfSpare)) / LF_DENS) +
+        " units of PAIRED LF - that is rocket dV being spent as jet fuel.".
+}
+PRINT "  NEED  climb " + ROUND(planClimb * PLAN_LOSS_FACTOR) + " + circ " +
+      ROUND(planCirc) + " + deorbit " + ROUND(planDeorb) + " + margin " +
+      ROUND(DV_MARGIN) + "  =  " + ROUND(dvRequired) + " m/s".
+// Note the handover figure can legitimately come out *above* the pad figure:
+// burning an LF-only reserve lightens the ship without touching a single
+// paired unit, which is exactly what that reserve is for.
+PRINT "  HAVE  " + ROUND(dvHandover) + " m/s at the handover (tanks hold " +
+      ROUND(dvAtPad) + " m/s of pairs on the pad)".
+PRINT "  TWR   " + ROUND(twrAtHandover(0, 0, 0), 2) + " closed cycle at the handover".
+
+IF dvHandover >= dvRequired {
+  PRINT "  => GO. " + ROUND(dvHandover - dvRequired) + " m/s in hand.".
+  IF twrAtHandover(0, 0, 0) < PLAN_TWR_MIN {
+    PRINT "  !! ...but closed-cycle TWR is below " + ROUND(PLAN_TWR_MIN, 2) +
+          ". The climb will be slow and lossy; consider another RAPIER.".
+  }
+} ELSE {
+  SET dvShort TO dvRequired - dvHandover.
+  PRINT "======================================================".
+  PRINT "!! NOT ENOUGH dV - SHORT BY " + ROUND(dvShort) + " m/s".
+  PRINT "   (needs " + ROUND(dvRequired) + ", has " + ROUND(dvHandover) + " at handover)".
+  PRINT "   This ship is not expected to make " + ROUND(REQUESTED_APOAPSIS / 1000) +
+        " km with deorbit fuel left.".
+  PRINT "".
+  PRINT "   TO CLOSE THE GAP:".
+
+  // --- cheapest fix first: is the LF/Ox split starving the jets? ------------
+  //  Adding liquid fuel alone costs a fraction of what balanced LF/Ox costs,
+  //  because every tonne of it goes to the jets at Isp ~3200 instead of being
+  //  hauled to orbit.  Worth saying before quoting the big number.
+  SET fixLf TO solveLfTopUp().
+  IF fixLf > 0.05 {
+    SET dvAfterLf TO dvHandoverSplit(fixLf, 0, 0).
+    PRINT "   * LIQUID FUEL FIRST. Your jets are eating " +
+          ROUND((jetLfPlan - lfSpare) / LF_DENS) + " units of paired LF.".
+    PRINT "     +" + ROUND(fixLf, 1) + " t of LF ONLY (" + ROUND(fixLf / LF_DENS) +
+          " units, +" + ROUND(fixLf * TANK_K, 1) + " t tank) feeds them from a".
+    PRINT "     proper reserve and lifts the handover to " + ROUND(dvAfterLf) +
+          " m/s (+" + ROUND(dvAfterLf - dvHandover) + " m/s).".
+    PRINT "     Compare that against the balanced figure below before you add".
+    PRINT "     any oxidizer - LF burns at jet Isp, oxidizer is just cargo.".
+  }
+
+  // --- more propellant, converged against the TWR it costs ------------------
+  SET addEngN TO 0.
+  SET fixProp TO -1.
+  FROM { LOCAL iter IS 0. } UNTIL iter >= 10 STEP { SET iter TO iter + 1. } DO {
+    SET fixProp TO solveProp(dvRequired, addEngN * engMassEach).
+    IF fixProp < 0 { BREAK. }
+    IF twrAtHandover(fixProp, addEngN * engMassEach, addEngN) >= PLAN_TWR_MIN { BREAK. }
+    SET addEngN TO addEngN + 1.
+  }
+
+  IF fixProp < 0 {
+    SET dvCeiling TO dvAtHandover(20000, 0).
+    PRINT "   * FUEL ALONE CANNOT DO IT. With tankage this heavy the mass ratio".
+    PRINT "     tops out around " + ROUND(dvCeiling) + " m/s however many tanks you bolt on,".
+    PRINT "     and you need " + ROUND(dvRequired) + " m/s. Cut dry mass or payload instead:".
+    PRINT "     lighter tanks, fewer parts, or less cargo.".
+  } ELSE {
+    SET fixDry  TO fixProp * TANK_K.
+    SET fixMass TO fixProp + fixDry + addEngN * engMassEach.
+    PRINT "   * FUEL: +" + ROUND(fixProp, 1) + " t of LF/Ox (" +
+          ROUND(fixProp * LF_FRAC / LF_DENS) + " LF + " +
+          ROUND(fixProp * OX_FRAC / OX_DENS) + " Ox)".
+    PRINT "     plus ~" + ROUND(fixDry, 1) + " t of tank structure to hold it.".
+    IF addEngN > 0 {
+      PRINT "     ...and +" + addEngN + " RAPIER(s) (" + ROUND(addEngN * engMassEach, 1) +
+            " t) to keep TWR at " + ROUND(PLAN_TWR_MIN, 2) + " - the fuel figure".
+      PRINT "     above already pays for hauling them.".
+    }
+    PRINT "     => launch mass " + ROUND(launchMass, 1) + " -> " +
+          ROUND(launchMass + fixMass, 1) + " t.".
+    IF twrAtHandover(fixProp, addEngN * engMassEach, addEngN) < PLAN_TWR_MIN {
+      PRINT "     !! Even then TWR is only " +
+            ROUND(twrAtHandover(fixProp, addEngN * engMassEach, addEngN), 2) +
+            " - this design is chasing its own tail. Cut dry mass.".
+    }
+  }
+
+  // --- or carry less ---------------------------------------------------------
+  SET fixCut TO solveMassCut(dvRequired).
+  IF fixCut > 0 {
+    PRINT "   * PAYLOAD: fly " + ROUND(fixCut, 1) + " t lighter (of " +
+          ROUND(payloadMass, 1) + " t aboard) and the fuel you have is enough.".
+  } ELSE IF payloadMass > 0 {
+    PRINT "   * PAYLOAD: even flying empty would not close the gap.".
+  }
+
+  // --- or accept a lower orbit ----------------------------------------------
+  PRINT "   * ORBIT: lower REQUESTED_APOAPSIS, or raise PLAN_SWITCH_SPD if this".
+  PRINT "     airframe really does hand over faster than " + ROUND(PLAN_SWITCH_SPD) + " m/s.".
+  PRINT "".
+  PRINT "   Launching anyway - the in-flight budget will settle for what it can.".
+  PRINT "======================================================".
+  IF PREFLIGHT_HOLD > 0 { WAIT PREFLIGHT_HOLD. }
 }
 PRINT "------------------------------------------------------".
 
+SET thrCmd TO 1.
 BRAKES OFF.
 
 // ---------------------------------------------------------------------------
@@ -780,6 +1142,19 @@ UNTIL switchNow {
 PRINT "Mode switch: " + swReason + ".".
 PRINT "  at " + ROUND(SHIP:ALTITUDE / 1000, 1) + " km, " + ROUND(SHIP:AIRSPEED) +
       " m/s, pitch " + ROUND(pitchCmd, 1) + " deg.".
+// Calibration feedback for the pre-flight model: every gram the ship has lost
+// so far went out of the jets, so the handover state and the jet phase's true
+// dV equivalent can both be read straight off the flight.  Trim
+// PLAN_SWITCH_ALT / PLAN_SWITCH_SPD / PLAN_JET_DV to these numbers and the
+// next pre-flight check will be about this airframe rather than a generic one.
+SET jetLfUsed TO launchMass - SHIP:MASS.
+SET jetDvReal TO JET_ISP * G0 * LN(launchMass / MAX(0.001, SHIP:MASS)).
+PRINT "  Jet phase used " + ROUND(jetLfUsed, 1) + " t of LF = " +
+      ROUND(jetDvReal) + " m/s of jet dV (planned " + ROUND(PLAN_JET_DV) + ").".
+PRINT "  Handover " + ROUND(SHIP:ALTITUDE / 1000, 1) + " km / " + ROUND(SHIP:AIRSPEED) +
+      " m/s (planned " + ROUND(PLAN_SWITCH_ALT / 1000, 1) + " / " +
+      ROUND(PLAN_SWITCH_SPD) + ").".
+
 setRapierMode(TRUE).
 WAIT 0.5.                           // let the engines settle in mode
 SET RKT_ISP TO measureRocketIsp().  // now the live engines quote rocket Isp

@@ -89,8 +89,11 @@ cp scripts/ascent.ks scripts/deorbit_land.ks  "<KSP>/Ships/Script/"
    ```
    RUN ascent.
    ```
-   It isolates the payload's fuel from its own, measures the ship (mass, weight,
-   TWR, ΔV), rolls, rotates, flies an **accelerate-first** air-breathing climb,
+   It isolates the payload's fuel from its own, measures the ship (mass, both
+   engine modes, TWR, ΔV) and runs a **pre-flight feasibility check** — if the
+   ship can't afford the orbit it says by how much and what to add, accounting
+   for the fact that fuel needs tankage and tankage needs fuel. Then it rolls,
+   rotates, flies an **accelerate-first** air-breathing climb,
    switches to closed cycle only when the jets have genuinely run out of breath,
    and circularises at **100 km** — while continuously reserving the ΔV needed to
    circularise *and* deorbit. If it can't afford the requested orbit it says so

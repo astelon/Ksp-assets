@@ -32,11 +32,62 @@ but Group 1 is a handy manual override.
 RUN ascent.
 ```
 
-Sequence: map the fuel network and isolate the payload → measure the ship and
-print the budget → roll → rotate at 80 m/s → accelerate-first air-breathing climb
+Sequence: map the fuel network and isolate the payload → measure both engine
+modes and run the feasibility check → roll → rotate at 80 m/s →
+accelerate-first air-breathing climb
 → switch to closed cycle when the jets actually run out of breath → rocket push
 to the requested apoapsis → coast (time-warped) → circularise → report. Hands off
 the whole way.
+
+### The pre-flight feasibility check
+
+Before the brakes come off, the script answers the question the autopilot can't
+answer once it's airborne: **is there enough ΔV aboard, and if not, how much
+more of what?** It ignites at zero throttle, flips the RAPIERs to closed cycle
+just long enough to read their real thrust and Isp, flips back, and prices the
+mission.
+
+The model is explicit about the two things that make a spaceplane different
+from a rocket:
+
+* **The jets drink the rocket's liquid fuel.** The ΔV figure you'd read on the
+  pad counts every paired LF/Ox unit in the tanks, which badly overstates what
+  survives to the mode switch. The check burns the jet phase *first* (rocket
+  equation at the measured air-breathing Isp over `PLAN_JET_DV`), then prices
+  the rocket phase against what's left. Note this can legitimately come out
+  *higher* than the pad figure — burning an LF-only reserve lightens the ship
+  without touching a single paired unit, which is what that reserve is for.
+* **Adding propellant is not free.** Tanks have structure, so x tonnes of fuel
+  costs x(1+k) on the runway, where k is measured from *this ship's own* tanks
+  (wet wings are not the same deal as a plain Mk3 fuselage). That's why the
+  answer to "how much more fuel?" isn't linear — and why there's a hard
+  ceiling: as tanks are added the mass ratio tends to (1+k)/k, and a design
+  needing more than that ceiling **cannot be fixed with fuel at all**.
+
+If the ship comes up short it says by how much, then ranks the fixes:
+
+1. **Liquid fuel first**, if the jets are eating paired LF. This is the most
+   common way a sound SSTO comes up short, and it's much the cheapest fix — LF
+   burns at Isp ~3200 in the jets, while oxidizer is just cargo. The check
+   quotes the LF-only top-up and what it buys.
+2. **Balanced LF/Ox**, converged against the TWR it costs: if the extra
+   propellant drops closed-cycle TWR below `PLAN_TWR_MIN`, it adds RAPIERs and
+   re-solves the fuel to haul them, iterating until both close.
+3. **Less payload**, or a lower orbit.
+
+It also flags **oxidizer that can never be paired** — pure dead mass carried to
+orbit and back.
+
+The check assumes a *healthy* handover (`PLAN_SWITCH_ALT` 20 km,
+`PLAN_SWITCH_SPD` 1450 m/s, `PLAN_JET_DV` 3000 m/s). If your airframe hands over
+somewhere else the verdict will be off, so the script prints the **actual**
+handover altitude, speed and jet ΔV at the real mode switch — trim the three
+assumptions to those numbers and the next check is about your ship rather than a
+generic one. A failed check does not stop the launch; it warns, pauses
+`PREFLIGHT_HOLD` seconds so you can read it, and flies anyway, because the
+in-flight budget will settle for whatever it can reach.
+
+### In flight
 
 The script is not tuned to one airframe — it will fly any RAPIER spaceplane that
 has the performance to reach orbit at all. Four things it decides for itself:
@@ -117,6 +168,11 @@ The ascent tunables worth knowing if a flight goes wrong:
 | `CC_FPA_HI` / `CC_FPA_LO` | 15° / 0° | Rocket-phase flight-path schedule, tapering as apoapsis approaches target. |
 | `CC_ACC_LOW` | 1.5 m/s² | Below this the rocket phase shallows out rather than fighting gravity. |
 | `DV_GLIDE_RESERVE` | 120 m/s | The floor the ascent will never burn through. |
+| `PLAN_SWITCH_ALT` / `PLAN_SWITCH_SPD` | 20 km / 1450 m/s | Handover state the pre-flight check assumes. Trim to what your ship actually achieves — the script prints it at the real switch. |
+| `PLAN_JET_DV` | 3000 m/s | Jet-phase ΔV equivalent, incl. drag. Sets how much LF the check expects the jets to burn. |
+| `PLAN_LOSS_FACTOR` | 1.50 | Gravity/drag/steering losses assumed on the rocket climb, pre-flight only. |
+| `PLAN_TWR_MIN` | 1.05 | Closed-cycle TWR the sizing advice tries to hold at handover. |
+| `PREFLIGHT_HOLD` | 12 s | Pause on a failed check so you can read it. 0 to skip. |
 | `ABORT_IF_INFEASIBLE` | `FALSE` | `TRUE` cuts the burn the moment orbit is priced out of reach, keeping the most fuel for a return. |
 
 ---
