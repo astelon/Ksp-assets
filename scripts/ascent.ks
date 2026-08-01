@@ -178,10 +178,12 @@ SET CONFIG:IPU TO 800.
 // ---------------------------------------------------------------------------
 //  Fuel-network mapping  --  which tanks are actually ours?
 // ---------------------------------------------------------------------------
-//  NOTE ON NAMING: kOS reserves its built-in function names and refuses to
-//  compile a script declaring a variable that would hide one (the
-//  CLOBBERBUILTINS check).  R(), V() and Q() are built-ins, so no identifier in
-//  this script is a bare single letter.
+//  NOTE ON NAMING: kOS refuses to compile a script that declares a variable
+//  hiding one of its built-in functions (the CLOBBERBUILTINS check).  This is
+//  not just about the one-letter ones - R(), V(), Q() - it catches ordinary
+//  words too: QUEUE, STACK, LIST, RANGE, NODE, PATH, BODY, CORE, TIME and a
+//  long tail of others are all built-ins.  `tools/check_kos.py` checks a script
+//  against the list before the game does; run it after editing.
 //
 //  A payload rides on a decoupler or separator, and a fuelled payload is not
 //  fuel we may spend: counting it would inflate the dV budget, and letting the
@@ -208,22 +210,22 @@ FUNCTION isSeparator {
 // traversed through, so the payload beyond them stays out.
 FUNCTION mapFeedNetwork {
   LOCAL seen  IS LEXICON().
-  LOCAL queue IS LIST().
+  LOCAL pending IS LIST().
   LOCAL engs  IS LIST().
   LIST ENGINES IN engs.
   FOR eng IN engs {
-    IF NOT seen:HASKEY(eng:UID) { seen:ADD(eng:UID, TRUE). queue:ADD(eng). }
+    IF NOT seen:HASKEY(eng:UID) { seen:ADD(eng:UID, TRUE). pending:ADD(eng). }
   }
   LOCAL idx IS 0.
-  UNTIL idx >= queue:LENGTH {
-    LOCAL prt IS queue[idx].
+  UNTIL idx >= pending:LENGTH {
+    LOCAL prt IS pending[idx].
     SET idx TO idx + 1.
     IF NOT isSeparator(prt) {
       LOCAL nbrs IS LIST().
       IF prt:HASPARENT { nbrs:ADD(prt:PARENT). }
       FOR kid IN prt:CHILDREN { nbrs:ADD(kid). }
       FOR nbr IN nbrs {
-        IF NOT seen:HASKEY(nbr:UID) { seen:ADD(nbr:UID, TRUE). queue:ADD(nbr). }
+        IF NOT seen:HASKEY(nbr:UID) { seen:ADD(nbr:UID, TRUE). pending:ADD(nbr). }
       }
     }
   }
@@ -823,14 +825,25 @@ SET payloadMass TO 0.
 FOR prt IN SHIP:PARTS {
   IF NOT CORE_UIDS:HASKEY(prt:UID) { SET payloadMass TO payloadMass + prt:MASS. }
 }
+// Dry mass is derived as (current mass - propellant aboard) rather than read
+// from PART:DRYMASS, so this works on older kOS builds too.  A tank also
+// holding monopropellant reads very slightly heavy, which biases the sizing
+// advice conservative - the safe direction.
 SET tankDry TO 0.
 SET tankCap TO 0.
 FOR prt IN CORE_TANKS {
-  SET tankDry TO tankDry + prt:DRYMASS.
+  LOCAL wet IS 0.
   FOR res IN prt:RESOURCES {
-    IF res:NAME = "LiquidFuel" { SET tankCap TO tankCap + res:CAPACITY * LF_DENS. }
-    IF res:NAME = "Oxidizer"   { SET tankCap TO tankCap + res:CAPACITY * OX_DENS. }
+    IF res:NAME = "LiquidFuel" {
+      SET tankCap TO tankCap + res:CAPACITY * LF_DENS.
+      SET wet TO wet + res:AMOUNT * LF_DENS.
+    }
+    IF res:NAME = "Oxidizer" {
+      SET tankCap TO tankCap + res:CAPACITY * OX_DENS.
+      SET wet TO wet + res:AMOUNT * OX_DENS.
+    }
   }
+  SET tankDry TO tankDry + MAX(0, prt:MASS - wet).
 }
 SET TANK_K TO 0.125.                // stock LF/Ox tanks: 8 t of fuel per t of dry
 IF tankCap > 0 { SET TANK_K TO tankDry / tankCap. }

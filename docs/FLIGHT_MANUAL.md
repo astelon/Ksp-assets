@@ -175,6 +175,25 @@ The ascent tunables worth knowing if a flight goes wrong:
 | `PREFLIGHT_HOLD` | 12 s | Pause on a failed check so you can read it. 0 to skip. |
 | `ABORT_IF_INFEASIBLE` | `FALSE` | `TRUE` cuts the burn the moment orbit is priced out of reach, keeping the most fuel for a return. |
 
+### Before you edit a script
+
+```
+python3 tools/check_kos.py scripts/*.ks
+```
+
+kOS compiles a script only when you `RUN` it — mid-flight — and it stops at the
+**first** error, so a typo costs a reload and a rollout, and you find the next
+one the same way. The checker catches what can be seen from the text: unbalanced
+braces, calls to undefined functions or with the wrong argument count, and
+**built-in shadowing**.
+
+That last one has bitten this repo twice. kOS refuses to compile a script that
+declares a variable hiding one of its built-in functions, and it isn't only the
+one-letter ones — `QUEUE`, `STACK`, `LIST`, `RANGE`, `NODE`, `PATH`, `BODY` and
+a long tail of ordinary words are built-ins too, so `LOCAL queue IS LIST().`
+will not compile. Assigning a *bound* variable is fine (`SET WARP TO 0.` is the
+documented way out of time warp); declaring one over it is not.
+
 ---
 
 ## Manual flight (no kOS)
