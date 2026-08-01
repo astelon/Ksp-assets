@@ -37,7 +37,7 @@ other brings it home and lands it back on the runway.
 
 ```
 craft/Mk3_Titan_SSTO.craft   The spaceplane (drop into your KSP save)
-scripts/ascent.ks            Runway -> 100 km orbit autopilot (kOS)
+scripts/ascent.ks            Runway -> orbit autopilot, ΔV-budgeting (kOS)
 scripts/deorbit_land.ks      Deorbit -> reentry -> runway landing autopilot (kOS)
 tools/build_craft.py         Procedural generator that produced the .craft
 docs/BUILD_GUIDE.md          Part-by-part manifest + manual rebuild instructions
@@ -89,8 +89,12 @@ cp scripts/ascent.ks scripts/deorbit_land.ks  "<KSP>/Ships/Script/"
    ```
    RUN ascent.
    ```
-   It rolls, rotates, climbs on the RAPIERs' air-breathing mode, switches to
-   closed cycle, and circularises at **100 km**, then prints leftover fuel.
+   It measures the ship (mass, weight, TWR, ΔV), rolls, rotates, flies a
+   **self-tuning** air-breathing climb, switches to closed cycle when the jets
+   run out of breath, and circularises at **100 km** — while continuously
+   reserving the ΔV needed to circularise *and* deorbit. If it can't afford the
+   requested orbit it says so and settles for the best one it can, rather than
+   stranding the ship up there.
 4. Do your mission (dock at your station via the dorsal shielded port, drop
    cargo, etc.).
 5. Come home:
