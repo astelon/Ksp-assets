@@ -32,37 +32,103 @@ but Group 1 is a handy manual override.
 RUN ascent.
 ```
 
-Sequence: measure the ship (mass, weight, TWR, ΔV) and print the budget → roll →
-rotate at 80 m/s → **self-tuning** air-breathing climb → switch to closed cycle
-when the jets actually run out of breath → rocket push to the requested apoapsis
-→ coast → circularise → report. Hands off the whole way.
+Sequence: map the fuel network and isolate the payload → measure both engine
+modes and run the feasibility check → roll → rotate at 80 m/s →
+accelerate-first air-breathing climb
+→ switch to closed cycle when the jets actually run out of breath → rocket push
+to the requested apoapsis → coast (time-warped) → circularise → report. Hands off
+the whole way.
 
-Three things the script decides for itself:
+### The pre-flight feasibility check
 
-* **ΔV budget.** Before takeoff it reads the real mass, thrust, TWR and the
-  closed-cycle ΔV in the tanks (rocket equation over the usable LF/Ox pair, Isp
-  read off the live engines), and it prints what it is reserving for
-  circularisation and deorbit.
-* **Settling for a lower orbit.** It flies for `REQUESTED_APOAPSIS` (100 km by
-  default), but re-prices the trip every fraction of a second. If the remaining
-  ΔV can no longer buy *climb + circularise + deorbit + margin*, it says so.
-  Above `SETTLE_MIN_ALT` (80 km) it stops climbing and banks the orbit it can
-  afford, keeping the circularisation and deorbit ΔV intact; below 80 km it
-  warns and keeps pushing, because half an orbit is worth nothing. The
-  circularisation burn also stops dead on the deorbit reserve rather than
-  spending it — you may end up slightly elliptical, but always able to come
-  home.
-* **The flight profile.** The air-breathing pitch is *searched*, not scheduled:
-  every second the script measures the specific-energy rate dE/dt and nudges
-  pitch in whichever direction improved it, inside a dynamic-pressure corridor.
-  The mode switch fires on flameout / thrust decay / acceleration collapse /
-  ceiling rather than at a fixed altitude, and the rocket phase steers to hold
-  ~35 s of time-to-apoapsis. So a heavy ship and a light one fly different,
-  appropriate profiles with no retuning.
+Before the brakes come off, the script answers the question the autopilot can't
+answer once it's airborne: **is there enough ΔV aboard, and if not, how much
+more of what?** It ignites at zero throttle, flips the RAPIERs to closed cycle
+just long enough to read their real thrust and Isp, flips back, and prices the
+mission.
+
+The model is explicit about the two things that make a spaceplane different
+from a rocket:
+
+* **The jets drink the rocket's liquid fuel.** The ΔV figure you'd read on the
+  pad counts every paired LF/Ox unit in the tanks, which badly overstates what
+  survives to the mode switch. The check burns the jet phase *first* (rocket
+  equation at the measured air-breathing Isp over `PLAN_JET_DV`), then prices
+  the rocket phase against what's left. Note this can legitimately come out
+  *higher* than the pad figure — burning an LF-only reserve lightens the ship
+  without touching a single paired unit, which is what that reserve is for.
+* **Adding propellant is not free.** Tanks have structure, so x tonnes of fuel
+  costs x(1+k) on the runway, where k is measured from *this ship's own* tanks
+  (wet wings are not the same deal as a plain Mk3 fuselage). That's why the
+  answer to "how much more fuel?" isn't linear — and why there's a hard
+  ceiling: as tanks are added the mass ratio tends to (1+k)/k, and a design
+  needing more than that ceiling **cannot be fixed with fuel at all**.
+
+If the ship comes up short it says by how much, then ranks the fixes:
+
+1. **Liquid fuel first**, if the jets are eating paired LF. This is the most
+   common way a sound SSTO comes up short, and it's much the cheapest fix — LF
+   burns at Isp ~3200 in the jets, while oxidizer is just cargo. The check
+   quotes the LF-only top-up and what it buys.
+2. **Balanced LF/Ox**, converged against the TWR it costs: if the extra
+   propellant drops closed-cycle TWR below `PLAN_TWR_MIN`, it adds RAPIERs and
+   re-solves the fuel to haul them, iterating until both close.
+3. **Less payload**, or a lower orbit.
+
+It also flags **oxidizer that can never be paired** — pure dead mass carried to
+orbit and back.
+
+The check assumes a *healthy* handover (`PLAN_SWITCH_ALT` 20 km,
+`PLAN_SWITCH_SPD` 1450 m/s, `PLAN_JET_DV` 3000 m/s). If your airframe hands over
+somewhere else the verdict will be off, so the script prints the **actual**
+handover altitude, speed and jet ΔV at the real mode switch — trim the three
+assumptions to those numbers and the next check is about your ship rather than a
+generic one. A failed check does not stop the launch; it warns, pauses
+`PREFLIGHT_HOLD` seconds so you can read it, and flies anyway, because the
+in-flight budget will settle for whatever it can reach.
+
+### In flight
+
+The script is not tuned to one airframe — it will fly any RAPIER spaceplane that
+has the performance to reach orbit at all. Four things it decides for itself:
+
+* **Whose fuel is whose.** It walks the part tree outward from the engines and
+  refuses to cross any decoupler, separator or docking port. Only tanks inside
+  that feed network count as ΔV, and crossfeed is switched off on every
+  separator, so a **fuelled payload can neither inflate the budget nor be
+  siphoned during the climb**. If a separator exposes no crossfeed toggle, the
+  script falls back to disabling flow on the payload's tanks and tells you to
+  re-enable them after you release the payload.
+* **The flight profile — accelerate first.** Both powered phases obey one rule:
+  climb only as steeply as the ship can climb *while still gaining speed*. The
+  air-breathing phase commands a vertical speed, raising it while acceleration
+  is healthy and lowering it the moment acceleration sags; the rocket phase
+  commands a flight-path angle biased the same way. A single controller turns
+  that command into pitch — feed-forward γ plus a slow, clamped trim that learns
+  this airframe's angle of attack — so the nose moves smoothly instead of
+  hunting. Time-to-apoapsis is deliberately *not* a control variable: it is
+  discontinuous exactly where the rocket phase starts.
+* **When the jets are done.** Air-breathing Isp is roughly ten times the
+  rocket's, so the switch is deliberately reluctant: flameout, thrust decayed
+  off its own measured peak, airspeed falling away from its peak, or no
+  acceleration left *after* the profile has already flattened out. One low
+  acceleration sample while the nose is up is not evidence, and switching early
+  throws away hundreds of m/s of nearly-free speed.
+* **What orbit it can actually afford.** It flies for `REQUESTED_APOAPSIS`
+  (100 km by default) but *measures* what the climb really costs — how much of
+  the bill each m/s of spent ΔV retires — and re-prices the orbit from that
+  instead of trusting an impulsive estimate. If the target is priced out it
+  settles for the best orbit it can afford and says so.
+
+**It never burns dry.** Two hard floors police every burn. Once an orbit is
+genuinely in reach the ascent stops at *circularise + deorbit + margin*, and
+below that a glide reserve (`DV_GLIDE_RESERVE`, 120 m/s) is kept back no matter
+what. The circularisation burn stops dead on the deorbit reserve rather than
+spending it — you may end up slightly elliptical, but always able to come home.
 
 If the ship is so short of ΔV that the apoapsis never clears the atmosphere, the
-script says so, skips circularisation, and hands back a glider — no deorbit burn
-is needed from there.
+script says so, skips circularisation, and hands back a glider with fuel still in
+the tanks — no deorbit burn is needed from there.
 
 ### Home again
 
@@ -87,10 +153,27 @@ early to leave room for that. If no crossing is found (a wildly inclined or
 non-circular orbit), it says so and falls back to the old real-time wait.
 
 Both scripts expose their tunables at the top — trim `REQUESTED_APOAPSIS`,
-`ROTATE_SPEED`, `DV_MARGIN`, `SETTLE_MIN_ALT`, `TGT_ETA_AP`, `DEORBIT_LEAD`,
-`WARP_LEAD`, `GLIDE_SPEED`, `FLARE_ALT`, etc. to taste. `DEORBIT_PE` appears in *both*
-scripts and should match: the ascent script reserves the ΔV that the deorbit
-script will spend.
+`ROTATE_SPEED`, `DV_MARGIN`, `DV_GLIDE_RESERVE`, `DEORBIT_LEAD`, `WARP_LEAD`,
+`GLIDE_SPEED`, `FLARE_ALT`, etc. to taste. `DEORBIT_PE` appears in *both* scripts
+and should match: the ascent script reserves the ΔV that the deorbit script will
+spend.
+
+The ascent tunables worth knowing if a flight goes wrong:
+
+| Tunable | Default | What it does |
+|---|---|---|
+| `AB_ACC_LOW` / `AB_ACC_HIGH` | 1.2 / 3.0 m/s² | The acceleration deadband the air-breathing climb rate is traded against. Raise `AB_ACC_LOW` to fly flatter and reach the mode switch faster. |
+| `SW_ARM_SPEED` | 1150 m/s | No thrust/acceleration sensing below this, so the jets are never given up early. |
+| `SW_SPEED_HARD` | 1600 m/s | Hard backstop on the mode switch. |
+| `CC_FPA_HI` / `CC_FPA_LO` | 15° / 0° | Rocket-phase flight-path schedule, tapering as apoapsis approaches target. |
+| `CC_ACC_LOW` | 1.5 m/s² | Below this the rocket phase shallows out rather than fighting gravity. |
+| `DV_GLIDE_RESERVE` | 120 m/s | The floor the ascent will never burn through. |
+| `PLAN_SWITCH_ALT` / `PLAN_SWITCH_SPD` | 20 km / 1450 m/s | Handover state the pre-flight check assumes. Trim to what your ship actually achieves — the script prints it at the real switch. |
+| `PLAN_JET_DV` | 3000 m/s | Jet-phase ΔV equivalent, incl. drag. Sets how much LF the check expects the jets to burn. |
+| `PLAN_LOSS_FACTOR` | 1.50 | Gravity/drag/steering losses assumed on the rocket climb, pre-flight only. |
+| `PLAN_TWR_MIN` | 1.05 | Closed-cycle TWR the sizing advice tries to hold at handover. |
+| `PREFLIGHT_HOLD` | 12 s | Pause on a failed check so you can read it. 0 to skip. |
+| `ABORT_IF_INFEASIBLE` | `FALSE` | `TRUE` cuts the burn the moment orbit is priced out of reach, keeping the most fuel for a return. |
 
 ---
 

@@ -89,12 +89,20 @@ cp scripts/ascent.ks scripts/deorbit_land.ks  "<KSP>/Ships/Script/"
    ```
    RUN ascent.
    ```
-   It measures the ship (mass, weight, TWR, ΔV), rolls, rotates, flies a
-   **self-tuning** air-breathing climb, switches to closed cycle when the jets
-   run out of breath, and circularises at **100 km** — while continuously
-   reserving the ΔV needed to circularise *and* deorbit. If it can't afford the
-   requested orbit it says so and settles for the best one it can, rather than
-   stranding the ship up there.
+   It isolates the payload's fuel from its own, measures the ship (mass, both
+   engine modes, TWR, ΔV) and runs a **pre-flight feasibility check** — if the
+   ship can't afford the orbit it says by how much and what to add, accounting
+   for the fact that fuel needs tankage and tankage needs fuel. Then it rolls,
+   rotates, flies an **accelerate-first** air-breathing climb,
+   switches to closed cycle only when the jets have genuinely run out of breath,
+   and circularises at **100 km** — while continuously reserving the ΔV needed to
+   circularise *and* deorbit. If it can't afford the requested orbit it says so
+   and settles for the best one it can, rather than stranding the ship up there,
+   and it will not burn through its glide reserve under any circumstances.
+
+   The script is generic: it flies any RAPIER spaceplane capable of reaching
+   orbit, not just this one. See the [flight manual](docs/FLIGHT_MANUAL.md) for
+   how it picks its profile and what to trim if a flight comes up short.
 4. Do your mission (dock at your station via the dorsal shielded port, drop
    cargo, etc.).
 5. Come home:
