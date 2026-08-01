@@ -11,16 +11,33 @@
 //
 //  Design notes (why it flies the way it does)
 //  -------------------------------------------
-//  * ACCELERATE FIRST.  Both powered phases obey one rule: climb only as
-//    steeply as the ship can climb *while still gaining speed*.  Air-breathing
-//    holds a commanded vertical speed that is raised while acceleration is
-//    healthy and lowered the moment it sags; the rocket phase holds a commanded
-//    flight-path angle biased the same way.  A spaceplane that stops
-//    accelerating is not climbing, it is dying, and no amount of pitch fixes
-//    it.  (The previous version hill-climbed pitch on dE/dt and let the nose
-//    reach 25 deg at 9 km and 20 deg at the mode switch; that killed the
-//    acceleration, tripped the "jets are done" test at 1136 m/s, and threw away
-//    roughly 400 m/s of nearly-free air-breathing speed.)
+//  * THE AIR-BREATHING CLIMB RIDES A DYNAMIC-PRESSURE CORRIDOR.  A jet's thrust
+//    is bought with air, so the altitude the ship should be at is whatever
+//    altitude keeps Q near a target as speed builds - which is a climb that
+//    starts fast and flattens right out as the ship goes hypersonic.  The
+//    command is derived, not hill-climbed: holding Q constant needs a vertical
+//    speed of 2*H*a/v (H = the atmosphere's scale height, measured in flight),
+//    plus a proportional term that closes any standing Q error.
+//      The previous version raised the commanded climb rate whenever
+//    acceleration was healthy.  On a ship with thrust to spare that ramps the
+//    command to its clamp in seconds: in flight the nose pegged at the 28 deg
+//    limit from 13 km up and the ship arrived at 24 km doing 1000 m/s, with the
+//    jets down to 25% of peak thrust and nothing left to breathe.  It then had
+//    to dive 2 km to restart them.  Spare acceleration is not a reason to
+//    climb; it is a reason to go faster in air the engine can still use.
+//  * ACCELERATION IS STILL THE RED LINE.  The Q corridor is overruled by the
+//    guards: never mush into the ground, never descend once high and fast (a
+//    hypersonic dive back into thick air is the most expensive manoeuvre in the
+//    flight), and never chase Q the intakes cannot deliver.
+//  * THE ROCKET PHASE NEVER STEEPENS FOR SPARE THRUST.  Above the drag layer a
+//    steeper climb buys nothing an engine burn would not buy more cheaply, and
+//    every degree of it is a cosine loss plus g*sin(gamma) of gravity loss.  So
+//    the flight-path command only ever shallows, and it is capped by a schedule
+//    that flattens with altitude.  (The previous version steepened on high
+//    acceleration, which is exactly backwards: in flight it pushed the command
+//    to 17.8 deg and the nose to 31.8 deg at 29 km, ending at MECO with 461 m/s
+//    of vertical velocity - speed bought at rocket prices and pointed the wrong
+//    way.)
 //  * ONE STABLE INNER LOOP.  Pitch is not bumped up and down by a bang-bang
 //    test.  A single controller converts a commanded flight-path angle into a
 //    pitch command: feed-forward gamma plus a slow, clamped, anti-windup trim
@@ -28,11 +45,22 @@
 //    used as a control variable - it is discontinuous when apoapsis is near the
 //    ship's own altitude, which is exactly where the rocket phase starts, and
 //    steering on it produced the +-25 deg pitch oscillation seen in flight.
-//  * THE JETS ARE CHEAP.  Air-breathing Isp is roughly ten times the rocket's,
-//    so the switch is deferred until the jets are genuinely finished: flameout,
-//    thrust decayed off its own peak, airspeed falling away from its peak, or
-//    no acceleration left *after* the profile has already flattened out.  A
-//    single low-acceleration sample while the nose is up is not evidence.
+//  * THE MODE SWITCH IS AN ECONOMIC DECISION, NOT A THRESHOLD.  Every sample
+//    the script prices both modes in the same currency - tonnes of
+//    rocket-equivalent propellant per m/s of speed bought - and breathes for
+//    exactly as long as the jets are the cheaper way to buy speed.  Drag is not
+//    guessed: it is read out of the force balance the ship is already flying
+//    (D = T - m*(a + g*sin(gamma))), which is what makes the closed-cycle side
+//    of the comparison honest.  Once the LF-only reserve is gone a tonne of
+//    liquid fuel costs the rocket phase a tonne of LF *and* the 1.22 t of
+//    oxidiser it would have paired with, so the jet's price rises by 20/9 at
+//    that moment and the comparison knows it.
+//      A fixed threshold cannot do this.  The previous version refused to look
+//    at thrust decay at all below 1150 m/s of airspeed - and a stalling ship is
+//    slow by definition.  In flight that gate deadlocked: at 24 km the jets
+//    were at 25% thrust with no acceleration left, the switch was disarmed
+//    because the ship was only doing 1020 m/s, and the profile dived 2 km to
+//    buy the airspeed that would have armed it.
 //  * PAYLOAD FUEL IS NOT OUR FUEL.  The script walks the part tree out from the
 //    engines and stops at every decoupler, separator and docking port.  Only
 //    tanks inside that feed network are counted as dV, crossfeed is switched
@@ -90,12 +118,21 @@ SET ABORT_IF_INFEASIBLE TO FALSE.   // TRUE = cut the burn the moment orbit is
 //  rocket does the rest.  The handover assumptions below are what a healthy
 //  RAPIER spaceplane achieves on Kerbin; the script prints the *actual* values
 //  at the real mode switch so you can calibrate them for your airframe.
-SET PLAN_SWITCH_ALT  TO 20000.      // assumed altitude at the mode switch (m)
-SET PLAN_SWITCH_SPD  TO 1450.       // ... and surface speed there (m/s)
-SET PLAN_JET_DV      TO 3000.       // jet-phase dV equivalent, incl. drag (m/s)
-SET PLAN_LOSS_FACTOR TO 1.50.       // gravity/drag/steering losses, rocket climb
+SET PLAN_SWITCH_ALT  TO 21000.      // assumed altitude at the mode switch (m)
+SET PLAN_SWITCH_SPD  TO 1400.       // ... and surface speed there (m/s)
+SET PLAN_JET_DV      TO 0.          // jet-phase dV equivalent incl. drag (m/s);
+                                    // 0 = derive it from this ship's jet TWR
+SET PLAN_JET_DV_K    TO 2.2.        // jet dV per m/s of handover speed at TWR
+                                    // 0.5; a draggy, slow-accelerating airframe
+                                    // spends far longer fighting drag, so the
+                                    // multiplier falls as take-off TWR rises
+SET PLAN_LOSS_FACTOR TO 1.75.       // gravity/drag/steering losses, rocket climb
 SET PLAN_TWR_MIN     TO 1.05.       // closed-cycle TWR wanted at the handover
 SET PLAN_JET_ISP     TO 3200.       // air-breathing Isp if it cannot be read (s)
+SET PLAN_GO_MARGIN   TO 0.08.       // dV in hand, as a fraction of the bill,
+                                    // below which the answer is MARGINAL and
+                                    // not GO - the model is not accurate to
+                                    // better than this
 SET PREFLIGHT_HOLD   TO 12.         // pause this long on a failed check (s)
 
 // --- Attitude controller (shared by both powered phases) --------------------
@@ -103,49 +140,92 @@ SET AOA_KI       TO 0.30.           // trim gain, deg of trim per deg of error p
 SET AOA_TRIM_MAX TO 14.             // trim authority clamp (deg)
 
 // --- Runway / air-breathing climb -------------------------------------------
+//  The profile is a dynamic-pressure corridor: fly whatever climb rate keeps Q
+//  near AB_Q_TARGET as the ship accelerates.  That is the altitude band where
+//  the intakes are fed and the RAPIER's velocity curve pays, and it produces the
+//  classic spaceplane ascent for free - a brisk climb while subsonic, then a
+//  long shallow acceleration that drifts up to ~20 km by 1400 m/s.
 SET ROTATE_SPEED    TO 80.          // surface speed to rotate the nose up (m/s)
 SET ROTATE_PITCH    TO 10.          // fixed pitch used until guidance engages (deg)
 SET AB_GUIDE_SPEED  TO 160.         // hand over to the vs controller above this (m/s)
 SET AB_PITCH_MIN    TO -6.          // pitch clamp, air-breathing phase (deg)
 SET AB_PITCH_MAX    TO 28.
+SET AB_FPA_MAX      TO 22.          // commanded flight path never steeper (deg);
+                                    // keeps the vs command flyable so the AoA
+                                    // trim cannot wind up against the clamp
 SET AB_TUNE_DT      TO 1.           // profile re-scheduling interval (s)
-SET AB_VS_INIT      TO 110.         // initial commanded climb rate (m/s)
-SET AB_VS_MAX       TO 220.         // ... clamp, upper
-SET AB_VS_DIVE      TO -20.         // ... clamp, lower (shallow dive to build speed)
-SET AB_VS_STEP      TO 10.          // command change per AB_TUNE_DT (m/s)
-SET AB_ACC_LOW      TO 1.2.         // below this longitudinal accel, flatten out
-SET AB_ACC_HIGH     TO 3.0.         // above this, buy altitude with the spare
-SET AB_DIVE_ALT     TO 15000.       // no descending below this altitude (m)
+SET AB_VS_MAX       TO 200.         // commanded climb rate, clamp (m/s)
+SET AB_VS_RATE      TO 25.          // how fast the command may move (m/s per s)
+SET AB_Q_TARGET     TO 0.30.        // dynamic pressure the corridor holds (atm)
+SET AB_Q_KP         TO 0.04.        // corridor gain (1/s) on ln(Q/Qtarget)
+SET AB_ACC_SMOOTH   TO 0.4.         // low-pass on measured accel, 0..1 (1 = raw)
 SET AB_FLOOR_ALT    TO 8000.        // hold at least AB_VS_FLOOR under this (m)
 SET AB_VS_FLOOR     TO 25.          // ... that minimum climb rate (m/s)
-SET AB_Q_MAX        TO 0.55.        // too deep in the air: climb out (atm)
-SET AB_Q_MIN        TO 0.06.        // too thin to breathe: sink back in (atm)
+SET AB_Q_MAX        TO 0.55.        // hard ceiling on Q: climb out regardless (atm)
 SET AB_VS_QCLIMB    TO 70.          // climb rate forced by the high-Q guard (m/s)
+//  Descending is allowed only low and transonic, where a shallow push through
+//  the drag rise is cheap.  It is forbidden high up: a hypersonic dive back into
+//  thick air spends far more on drag than the airspeed is worth, and it is what
+//  the old "too thin to breathe, sink back in" guard actually did.
+SET AB_DIVE_ALT_MAX TO 12000.       // no descending above this altitude (m)
+SET AB_DIVE_SPEED   TO 280.         // ... nor below this airspeed (m/s)
+SET AB_VS_DIVE      TO -15.         // shallow dive rate where it is allowed (m/s)
 
 // --- Mode-switch sensing ----------------------------------------------------
-//  Deliberately reluctant.  The jets are ~10x cheaper than the rocket, so the
-//  cost of switching one sample early is far higher than the cost of hanging on.
-SET SW_ARM_SPEED    TO 1150.        // no thrust/accel sensing below this (m/s)
-SET SW_THRUST_DECAY TO 0.45.        // switch when thrust < this x peak jet thrust
-SET SW_MIN_ACCEL    TO 0.12.        // "no acceleration left" threshold (m/s^2)
-SET SW_SPEED_LOSS   TO 45.          // switch if airspeed falls this far off peak (m/s)
-SET SW_STALL_TIME   TO 20.          // flat and not accelerating this long = done (s)
+//  Priced, not thresholded.  Both modes are costed in tonnes of
+//  rocket-equivalent propellant per m/s of speed bought, and the jets keep
+//  running for exactly as long as they are the cheaper of the two.
+SET SW_COST_RATIO   TO 1.0.         // switch when jet cost > this x rocket cost
+                                    // (>1 = hang on to the jets a little past
+                                    // break-even, <1 = leave early)
+SET SW_MIN_ACCEL    TO 0.25.        // jets making less than this are done (m/s^2).
+                                    // This one is pragmatism, not economics: in
+                                    // level flight the jets stay *genuinely*
+                                    // cheaper per m/s down to a crawl, so the
+                                    // priced test alone will happily cruise for
+                                    // ten minutes buying 0.2 m/s^2.  The break-
+                                    // even on the reference airframe was 0.39,
+                                    // so the economics normally fire first and
+                                    // this only catches the pathological case.
 SET SW_CONFIRM      TO 3.           // consecutive samples needed to confirm
+SET SW_ARM_ALT      TO 6000.        // no economic sensing below this (m) - the
+                                    // ship is still climbing out and the
+                                    // measurement is noise
+SET SW_ARM_DECAY    TO 0.85.        // ... nor until jet thrust is under this
+                                    // fraction of its own peak.  This is not a
+                                    // switch test, it is a gate against the
+                                    // transonic hole: pushing through Mach 1 the
+                                    // drag rise can hold acceleration under
+                                    // SW_MIN_ACCEL for several seconds while the
+                                    // RAPIER's velocity curve is still climbing.
+                                    // Thrust does not fall off peak until the
+                                    // ship is genuinely high and fast, so this
+                                    // costs nothing and rules that window out.
 SET SW_ALT_HARD     TO 28000.       // hard backstop: switch by this altitude (m)
-SET SW_SPEED_HARD   TO 1600.        // ... or this airspeed (m/s)
+SET SW_SPEED_HARD   TO 1700.        // ... or this airspeed (m/s)
 
 // --- Closed-cycle push ------------------------------------------------------
-SET CC_FPA_HI      TO 15.           // commanded flight-path angle at the switch (deg)
+SET CC_FPA_HI      TO 0.            // commanded flight-path angle at the switch
+                                    // (deg); 0 = derive it from the handover TWR
+SET CC_FPA_TWR_A   TO 24.           // derived CC_FPA_HI = A - B * TWR: a heavy,
+SET CC_FPA_TWR_B   TO 8.            // low-TWR ship burns for longer and has to
+                                    // climb harder to stay out of the air; a
+                                    // punchy one should stay flat and go fast
 SET CC_FPA_LO      TO 0.            // ... once the apoapsis target is reached (deg)
+SET CC_FPA_FLAT    TO 2.            // floor the altitude cap decays to (deg)
+SET CC_FLAT_ALT    TO 45000.        // by this altitude drag is gone and there is
+                                    // no reason left to climb rather than
+                                    // accelerate: cap the command at CC_FPA_FLAT
 SET CC_PITCH_MIN   TO -8.           // pitch clamp, rocket phase (deg)
 SET CC_PITCH_MAX   TO 40.
 SET CC_ACC_DT      TO 0.5.          // acceleration sampling interval (s)
-SET CC_ACC_LOW     TO 1.5.          // below this, shallow out (m/s^2)
-SET CC_ACC_HIGH    TO 5.0.          // above this, allow a steeper climb (m/s^2)
+SET CC_ACC_LOW     TO 1.5.          // below this accel, shallow out (m/s^2)
 SET CC_BIAS_STEP   TO 0.5.          // bias change per sample (deg)
 SET CC_BIAS_DOWN   TO 15.           // how far the bias may shallow the climb (deg)
-SET CC_BIAS_UP     TO 6.            // ... and steepen it (deg)
 SET CC_VS_ATM_MIN  TO 50.           // never stop climbing inside the atmosphere (m/s)
+SET CC_TAP_MIN     TO 25.           // keep at least this long to the apex (s)
+SET CC_TAP_GAIN    TO 0.35.         // deg of extra climb per second short of it
+SET CC_TAP_MAX_ADD TO 12.           // ... clamped (deg)
 SET CC_POLICE_DT   TO 0.5.          // dV re-pricing interval (s)
 SET FEAS_ARM_DV    TO 350.          // rocket dV spent before trusting the measured
                                     // climb efficiency (m/s)
@@ -415,6 +495,73 @@ FUNCTION clampVal {
 }
 
 // ---------------------------------------------------------------------------
+//  Atmosphere  --  measured off the body, never assumed
+// ---------------------------------------------------------------------------
+FUNCTION atmPressureAt {            // ambient pressure at an altitude (atm)
+  PARAMETER altM.
+  IF altM >= ATM_TOP { RETURN 0. }
+  RETURN MAX(0, SHIP:BODY:ATM:ALTITUDEPRESSURE(MAX(0, altM))).
+}
+
+// Pressure scale height here, in metres, from a finite difference on the body's
+// own pressure curve.  Density and pressure share a scale height closely enough
+// for guidance, and measuring it means the Q corridor works on Kerbin, Laythe,
+// Eve or a rescaled system without a single retuned constant.
+FUNCTION atmScaleHeight {
+  LOCAL pHere IS atmPressureAt(SHIP:ALTITUDE).
+  LOCAL pUp   IS atmPressureAt(SHIP:ALTITUDE + 1000).
+  IF pHere <= 0 OR pUp <= 0 OR pUp >= pHere { RETURN 5000. }
+  RETURN clampVal(1000 / LN(pHere / pUp), 1500, 20000).
+}
+
+// Closed-cycle thrust *here*: the vacuum figure de-rated by ambient pressure,
+// interpolated between the two readings taken on the runway.
+FUNCTION ccThrustHere {
+  RETURN ccThrustVac + (ccThrustAsl - ccThrustVac) *
+         clampVal(atmPressureAt(SHIP:ALTITUDE), 0, 1).
+}
+
+// What a tonne of liquid fuel costs the rocket phase.  While an LF-only reserve
+// remains the jets are drinking fuel no oxidiser could ever pair with, so it is
+// free in dV terms; once that is gone every tonne the jets take also strands
+// 11/9 t of oxidiser, and the true price is 20/9 t of rocket propellant.
+FUNCTION lfPriceFactor {
+  IF coreResAmt("LiquidFuel") >
+     coreResAmt("Oxidizer") * LFO_LF_RATIO / LFO_OX_RATIO { RETURN 1. }
+  RETURN (LFO_LF_RATIO + LFO_OX_RATIO) / LFO_LF_RATIO.
+}
+
+// Drag (kN) read straight out of the force balance the ship is already flying:
+// m*a = T - D - m*g*sin(gamma).  No drag model, no part survey - whatever is
+// slowing this airframe down at this Mach and this Q is in the number.
+FUNCTION dragNow {
+  PARAMETER accMeasured.
+  LOCAL sinF IS clampVal(SHIP:VERTICALSPEED / MAX(30, SHIP:VELOCITY:SURFACE:MAG), -1, 1).
+  RETURN MAX(0, SHIP:AVAILABLETHRUST - SHIP:MASS * (accMeasured + localG() * sinF)).
+}
+
+// Gravity net of the centrifugal relief the ship has already earned.  At 1800
+// m/s of horizontal speed this is more than half of g on Kerbin, so ignoring it
+// badly understates how long the ship will keep coasting upward.
+FUNCTION gEffective {
+  LOCAL rr IS BODY_R + SHIP:ALTITUDE.
+  LOCAL vTot IS SHIP:VELOCITY:ORBIT:MAG.
+  LOCAL vv IS SHIP:VERTICALSPEED.
+  LOCAL vh IS SQRT(MAX(0, vTot * vTot - vv * vv)).
+  RETURN localG() - vh * vh / rr.
+}
+
+// Seconds until the ship stops climbing, if it stopped thrusting now.  Smooth
+// and monotone everywhere, unlike ETA:APOAPSIS, which jumps exactly where the
+// rocket phase lives - with apoapsis sitting just above the ship.
+FUNCTION apexTimeEst {
+  LOCAL ge IS gEffective().
+  IF SHIP:VERTICALSPEED <= 0 { RETURN 0. }
+  IF ge <= 0.05 { RETURN 9999. }    // already orbital: it is not coming down
+  RETURN SHIP:VERTICALSPEED / ge.
+}
+
+// ---------------------------------------------------------------------------
 //  Orbital mechanics helpers  (altitudes in m above the surface)
 // ---------------------------------------------------------------------------
 FUNCTION vCircAt {                  // circular orbital speed at an altitude
@@ -548,7 +695,7 @@ SET OX_FRAC TO 1 - LF_FRAC.
 // equation at air-breathing Isp over the jet phase's dV equivalent.
 FUNCTION jetBurnFraction {
   PARAMETER jetIsp.
-  RETURN 1 - CONSTANT:E ^ (-PLAN_JET_DV / (jetIsp * G0)).
+  RETURN 1 - CONSTANT:E ^ (-planJetDv / (jetIsp * G0)).
 }
 
 //  All three take the upgrade as a split (addLf, addOx, addDry) rather than a
@@ -816,6 +963,18 @@ SET jetTwr     TO jetThrust / MAX(0.001, weightKN()).
 SET ROT_BONUS  TO SHIP:VELOCITY:ORBIT:MAG * SIN(LAUNCH_HEADING).
 SET lfMass0    TO coreResAmt("LiquidFuel") * LF_DENS.
 SET oxMass0    TO coreResAmt("Oxidizer") * OX_DENS.
+
+// The jet phase does not cost "handover speed" - it costs handover speed plus
+// everything drag took on the way, and how much that is depends almost entirely
+// on how long the ship spends in the air.  A 0.5-TWR airframe accelerates at a
+// crawl and pays drag for every second of it; a 0.8-TWR one is through the same
+// band in half the time.  Scaling the multiplier on take-off TWR is crude, but
+// it is far closer than a fixed 3000 m/s: on the reference flight the real
+// figure was 3637 m/s at TWR 0.50, which the default below reproduces.
+SET planJetDv TO PLAN_JET_DV.
+IF planJetDv <= 0 {
+  SET planJetDv TO PLAN_SWITCH_SPD * PLAN_JET_DV_K * clampVal(0.5 / MAX(0.15, jetTwr), 0.7, 1.4).
+}
 SET JET_FRAC   TO jetBurnFraction(JET_ISP).
 
 // Payload mass, and the structural cost of this ship's own tankage: tonnes of
@@ -885,7 +1044,7 @@ SET lfSpare    TO lfMass0 - oxMass0 * LFO_LF_RATIO / LFO_OX_RATIO.
 
 PRINT "FEASIBILITY for a " + ROUND(REQUESTED_APOAPSIS / 1000) + " km orbit".
 PRINT "  Assumes handover at " + ROUND(PLAN_SWITCH_ALT / 1000, 1) + " km / " +
-      ROUND(PLAN_SWITCH_SPD) + " m/s after ~" + ROUND(PLAN_JET_DV) + " m/s of jet dV,".
+      ROUND(PLAN_SWITCH_SPD) + " m/s after ~" + ROUND(planJetDv) + " m/s of jet dV,".
 PRINT "  and x" + ROUND(PLAN_LOSS_FACTOR, 2) + " losses on the rocket climb.".
 PRINT "  JETS  burn ~" + ROUND(jetLfPlan, 1) + " t of LF (" +
       ROUND(jetLfPlan / LF_DENS) + " units); LF-only reserve is " +
@@ -913,9 +1072,25 @@ PRINT "  HAVE  " + ROUND(dvHandover) + " m/s at the handover (tanks hold " +
 PRINT "  TWR   " + ROUND(twrAtHandover(0, 0, 0), 2) + " closed cycle at the handover".
 
 IF dvHandover >= dvRequired {
-  PRINT "  => GO. " + ROUND(dvHandover - dvRequired) + " m/s in hand.".
+  // "In hand" has to mean more than the model's own error bars.  A handful of
+  // m/s on a 1500 m/s bill is not a margin, it is a rounding difference between
+  // two estimates - and reporting it as GO is how a ship gets to 24 km before
+  // anyone finds out.  Anything under PLAN_GO_MARGIN of the bill is MARGINAL.
+  SET dvSpare TO dvHandover - dvRequired.
+  IF dvSpare >= dvRequired * PLAN_GO_MARGIN {
+    PRINT "  => GO. " + ROUND(dvSpare) + " m/s in hand (" +
+          ROUND(100 * dvSpare / MAX(1, dvRequired)) + "%).".
+  } ELSE {
+    PRINT "  => MARGINAL. Only " + ROUND(dvSpare) + " m/s in hand (" +
+          ROUND(100 * dvSpare / MAX(1, dvRequired)) + "% of the bill).".
+    PRINT "     This model is not accurate to better than ~" +
+          ROUND(100 * PLAN_GO_MARGIN) + "%, so treat that as a coin toss:".
+    PRINT "     a handover " + ROUND(0.1 * PLAN_SWITCH_SPD) +
+          " m/s slow, or drag " + ROUND(10) + "% worse than assumed, spends it.".
+    PRINT "     Add LF, cut payload, or lower REQUESTED_APOAPSIS before you fly.".
+  }
   IF twrAtHandover(0, 0, 0) < PLAN_TWR_MIN {
-    PRINT "  !! ...but closed-cycle TWR is below " + ROUND(PLAN_TWR_MIN, 2) +
+    PRINT "  !! ...and closed-cycle TWR is below " + ROUND(PLAN_TWR_MIN, 2) +
           ". The climb will be slow and lossy; consider another RAPIER.".
   }
 } ELSE {
@@ -1018,28 +1193,43 @@ WAIT UNTIL SHIP:AIRSPEED > AB_GUIDE_SPEED.
 // ---------------------------------------------------------------------------
 //  2. AIR-BREATHING CLIMB  --  accelerate first, climb with the change
 // ---------------------------------------------------------------------------
-//  One commanded quantity: vertical speed.  It is raised while the ship has
-//  spare acceleration and lowered the instant acceleration sags, so the ship
-//  finds its own best compromise at this mass, this payload, this air.  Three
-//  guards outrank the schedule: climb out of air that is too thick to push
-//  through, sink back into air too thin to breathe, and never mush into the
-//  ground.  The pitch that delivers the commanded climb comes from the shared
-//  flight-path controller, so the nose moves smoothly instead of hunting.
+//  One commanded quantity: vertical speed, and one thing it is trying to do -
+//  hold dynamic pressure at AB_Q_TARGET while the ship accelerates.  Q is the
+//  air the intakes are being fed, so a Q corridor is the same thing as "stay
+//  where the jets work", and it is the altitude schedule a good spaceplane
+//  ascent has anyway: steep while slow and low, then flattening out into a long
+//  hypersonic acceleration that drifts up as speed builds.
+//
+//  The command is derived rather than searched for.  Q = 0.5*rho*v^2 and
+//  rho ~ exp(-h/H), so
+//        d(ln Q)/dt  =  2a/v  -  vs/H
+//  and the vertical speed that holds Q exactly is vs = 2*H*a/v.  Add a
+//  proportional term on the standing error and that is the whole controller:
+//        vs = H * ( 2a/v + Kp * ln(Q / Qtarget) )
+//  H is measured off the body's own pressure curve each sample, so nothing here
+//  is tuned to Kerbin.  Note what it does with spare thrust: high a *does* buy
+//  climb, but only the climb needed to keep Q from rising - not all of it.
+//
+//  Guards outrank the corridor: climb out of air too thick to push through,
+//  never mush into the ground, and never descend once high and fast.  The pitch
+//  that delivers the commanded climb comes from the shared flight-path
+//  controller, so the nose moves smoothly instead of hunting.
 // ---------------------------------------------------------------------------
-PRINT "Air-breathing climb: accelerate-first profile.".
+PRINT "Air-breathing climb: Q corridor at " + ROUND(AB_Q_TARGET, 2) + " atm.".
 // Start from the climb the ship is already flying, not from a constant: at
-// handover speed a fixed 110 m/s command is a 40 deg flight path, and the nose
-// would slam to the clamp before the trim had learned anything.
-SET vsCmd     TO clampVal(SHIP:VERTICALSPEED, 30, AB_VS_INIT).
+// handover speed a fixed command is a 40 deg flight path, and the nose would
+// slam to the clamp before the trim had learned anything.
+SET vsCmd     TO clampVal(SHIP:VERTICALSPEED, 30, AB_VS_MAX).
 SET aoaTrim   TO 0.
 SET lastLoopT TO TIME:SECONDS.
 SET lastTuneT TO TIME:SECONDS.
 SET lastSpd   TO SHIP:AIRSPEED.
 SET accelNow  TO 0.
+SET accelSm   TO 0.
 SET peakJetT  TO SHIP:AVAILABLETHRUST.
-SET peakSpd   TO SHIP:AIRSPEED.
+SET costJet   TO 0.
+SET costRkt   TO 1.
 SET swVotes   TO 0.
-SET stallT    TO 0.
 SET switchNow TO FALSE.
 SET swReason  TO "hard backstop".
 SET lfWarned  TO FALSE.
@@ -1056,20 +1246,34 @@ UNTIL switchNow {
     SET lastTuneT TO nowT.
     SET accelNow TO (SHIP:AIRSPEED - lastSpd) / tuneDt.
     SET lastSpd  TO SHIP:AIRSPEED.
+    // The corridor's feed-forward term is proportional to acceleration, and a
+    // one-second finite difference is noisy, so it is filtered before it steers
+    // anything.  The switch economics read the same filtered number.
+    SET accelSm  TO accelSm + AB_ACC_SMOOTH * (accelNow - accelSm).
     SET peakJetT TO MAX(peakJetT, SHIP:AVAILABLETHRUST).
-    SET peakSpd  TO MAX(peakSpd, SHIP:AIRSPEED).
 
-    // Trade: spare acceleration buys altitude, missing acceleration is bought
-    // back by flattening out.  This is the whole profile.
-    IF accelNow > AB_ACC_HIGH { SET vsCmd TO vsCmd + AB_VS_STEP. }
-    ELSE IF accelNow < AB_ACC_LOW { SET vsCmd TO vsCmd - AB_VS_STEP. }
+    // ---- the Q corridor -----------------------------------------------------
+    LOCAL scaleH IS atmScaleHeight().
+    LOCAL qNow   IS MAX(0.0005, SHIP:Q).
+    LOCAL vsHold IS 2 * scaleH * accelSm / MAX(50, SHIP:AIRSPEED).
+    LOCAL vsWant IS vsHold + scaleH * AB_Q_KP * LN(qNow / AB_Q_TARGET).
+    // Keep the command inside what the airframe can actually fly.  A vs command
+    // the pitch clamp cannot deliver is not guidance, it is integral windup.
+    LOCAL vsFlyable IS SHIP:AIRSPEED * SIN(AB_FPA_MAX).
+    SET vsWant TO clampVal(vsWant, -vsFlyable, vsFlyable).
+    // Move toward it at a bounded rate so the nose is never asked to jump.
+    SET vsCmd TO vsCmd + clampVal(vsWant - vsCmd, -AB_VS_RATE * tuneDt, AB_VS_RATE * tuneDt).
 
-    // Guards, in priority order over the schedule.
+    // Guards, in priority order over the corridor.
     IF SHIP:Q > AB_Q_MAX { SET vsCmd TO MAX(vsCmd, AB_VS_QCLIMB). }
-    IF SHIP:Q < AB_Q_MIN AND SHIP:ALTITUDE > 14000 { SET vsCmd TO MIN(vsCmd, -10). }
     IF SHIP:ALTITUDE < AB_FLOOR_ALT { SET vsCmd TO MAX(vsCmd, AB_VS_FLOOR). }
+    // Descending is a low-and-transonic move only.  Thin air high up is not a
+    // reason to dive back into thick air at Mach 4 - it is the end of the
+    // air-breathing envelope, and the economics below will say so.
     LOCAL vsFloor IS 0.
-    IF SHIP:ALTITUDE > AB_DIVE_ALT { SET vsFloor TO AB_VS_DIVE. }
+    IF SHIP:ALTITUDE < AB_DIVE_ALT_MAX AND SHIP:AIRSPEED > AB_DIVE_SPEED {
+      SET vsFloor TO AB_VS_DIVE.
+    }
     SET vsCmd TO clampVal(vsCmd, vsFloor, AB_VS_MAX).
 
     // ---- book-keeping ------------------------------------------------------
@@ -1084,44 +1288,40 @@ UNTIL switchNow {
       SET lfWarned TO TRUE.
     }
 
-    // ---- sense the end of the air-breathing envelope ------------------------
-    //  Purely physical signals, and all of them require the profile to have
-    //  already given up climbing.  Jet Isp is ~10x the rocket's, so while the
-    //  jets still make thrust they are always the cheaper way to buy speed -
-    //  even though they burn liquid fuel the rocket phase would also like.
-    LOCAL armed   IS SHIP:AIRSPEED > SW_ARM_SPEED.
-    LOCAL flatOut IS vsCmd <= vsFloor + 1.
-    LOCAL shallow IS vsCmd <= AB_VS_FLOOR.
-    LOCAL decayed IS SHIP:AVAILABLETHRUST < peakJetT * SW_THRUST_DECAY.
-    LOCAL gasping IS flatOut AND accelNow < SW_MIN_ACCEL.
-    LOCAL sliding IS shallow AND SHIP:AIRSPEED < peakSpd - SW_SPEED_LOSS.
+    // ---- price both modes, and fly the cheaper one --------------------------
+    //  The question is never "are the jets finished?" but "is a m/s of speed
+    //  still cheaper out of the jets than out of the rocket?", and both sides
+    //  of that are measurable right now.  Drag comes out of the force balance
+    //  the ship is already flying, so the closed-cycle estimate is the same
+    //  airframe at the same Mach and Q - only the engine changes.
+    LOCAL dragKn IS dragNow(accelSm).
+    LOCAL thrRkt IS ccThrustHere().
+    LOCAL sinFpa IS clampVal(SHIP:VERTICALSPEED / MAX(50, SHIP:AIRSPEED), -1, 1).
+    LOCAL accRkt IS (thrRkt - dragKn) / SHIP:MASS - localG() * sinFpa.
+    // Flow in tonnes/s, priced in rocket-equivalent propellant: jet fuel is
+    // free while an LF-only reserve remains and costs 20/9 once it is gone.
+    LOCAL flowJet IS SHIP:AVAILABLETHRUST / (JET_ISP * G0) * lfPriceFactor().
+    LOCAL flowRkt IS thrRkt / (RKT_ISP * G0).
+    SET costJet TO flowJet / MAX(0.01, accelSm).
+    SET costRkt TO flowRkt / MAX(0.01, accRkt).
 
-    // Backstop for a ship that never reaches the arming speed at all: an
-    // underpowered airframe would otherwise sit here burning liquid fuel with
-    // no sensor allowed to fire.  If the profile has flattened right out and
-    // there is no acceleration left, the jets are finished whatever the
-    // airspeed says.
-    IF gasping { SET stallT TO stallT + tuneDt. } ELSE { SET stallT TO 0. }
-    LOCAL stalled IS stallT >= SW_STALL_TIME.
+    LOCAL armed  IS SHIP:ALTITUDE > SW_ARM_ALT AND
+                    SHIP:AVAILABLETHRUST < peakJetT * SW_ARM_DECAY.
+    LOCAL priced IS accRkt > 0 AND
+                    (accelSm < SW_MIN_ACCEL OR costJet > costRkt * SW_COST_RATIO).
 
     IF anyFlameout() OR SHIP:AVAILABLETHRUST < 1 {
       SET switchNow TO TRUE.
       SET swReason TO "flameout - out of intake air".
-    } ELSE IF stalled {
-      SET switchNow TO TRUE.
-      SET swReason TO "jets flat out of acceleration for " + ROUND(stallT) + " s at " +
-                      ROUND(SHIP:AIRSPEED) + " m/s".
-    } ELSE IF armed AND (decayed OR gasping OR sliding) {
+    } ELSE IF armed AND priced {
       SET swVotes TO swVotes + 1.
       IF swVotes >= SW_CONFIRM {
         SET switchNow TO TRUE.
-        IF decayed {
-          SET swReason TO "jet thrust decayed to " +
-                          ROUND(100 * SHIP:AVAILABLETHRUST / MAX(1, peakJetT)) + "% of peak".
-        } ELSE IF sliding {
-          SET swReason TO "airspeed falling off peak (" + ROUND(peakSpd) + " m/s)".
+        IF accelSm < SW_MIN_ACCEL {
+          SET swReason TO "jets out of acceleration (" + ROUND(accelSm, 2) + " m/s^2)".
         } ELSE {
-          SET swReason TO "flat and out of acceleration (" + ROUND(accelNow, 2) + " m/s^2)".
+          SET swReason TO "rocket is now cheaper - " + ROUND(1000 * costJet, 1) +
+                          " vs " + ROUND(1000 * costRkt, 1) + " kg of propellant per m/s".
         }
       }
     } ELSE {
@@ -1139,10 +1339,13 @@ UNTIL switchNow {
 
   IF nowT - abReportT > 15 {
     PRINT "  alt " + ROUND(SHIP:ALTITUDE / 1000, 1) + " km | " + ROUND(SHIP:AIRSPEED) +
-          " m/s | acc " + ROUND(accelNow, 2) + " | Q " + ROUND(SHIP:Q, 2).
+          " m/s | acc " + ROUND(accelSm, 2) + " | Q " + ROUND(SHIP:Q, 2) + "/" +
+          ROUND(AB_Q_TARGET, 2).
     PRINT "      vs " + ROUND(SHIP:VERTICALSPEED) + "/" + ROUND(vsCmd) +
           " | pitch " + ROUND(pitchCmd, 1) + " | thr " +
           ROUND(100 * SHIP:AVAILABLETHRUST / MAX(1, peakJetT)) + "% | dV " + ROUND(rocketDv()).
+    PRINT "      cost/m/s: jet " + ROUND(1000 * costJet, 1) + " vs rocket " +
+          ROUND(1000 * costRkt, 1) + " kg" .
     SET abReportT TO nowT.
   }
 
@@ -1158,12 +1361,12 @@ PRINT "  at " + ROUND(SHIP:ALTITUDE / 1000, 1) + " km, " + ROUND(SHIP:AIRSPEED) 
 // Calibration feedback for the pre-flight model: every gram the ship has lost
 // so far went out of the jets, so the handover state and the jet phase's true
 // dV equivalent can both be read straight off the flight.  Trim
-// PLAN_SWITCH_ALT / PLAN_SWITCH_SPD / PLAN_JET_DV to these numbers and the
+// PLAN_SWITCH_ALT / PLAN_SWITCH_SPD / PLAN_JET_DV_K to these numbers and the
 // next pre-flight check will be about this airframe rather than a generic one.
 SET jetLfUsed TO launchMass - SHIP:MASS.
 SET jetDvReal TO JET_ISP * G0 * LN(launchMass / MAX(0.001, SHIP:MASS)).
 PRINT "  Jet phase used " + ROUND(jetLfUsed, 1) + " t of LF = " +
-      ROUND(jetDvReal) + " m/s of jet dV (planned " + ROUND(PLAN_JET_DV) + ").".
+      ROUND(jetDvReal) + " m/s of jet dV (planned " + ROUND(planJetDv) + ").".
 PRINT "  Handover " + ROUND(SHIP:ALTITUDE / 1000, 1) + " km / " + ROUND(SHIP:AIRSPEED) +
       " m/s (planned " + ROUND(PLAN_SWITCH_ALT / 1000, 1) + " / " +
       ROUND(PLAN_SWITCH_SPD) + ").".
@@ -1187,8 +1390,22 @@ PRINT "Closed cycle. " + budgetLine(targetAp, lossFactor).
 PRINT "  Mass " + ROUND(SHIP:MASS, 1) + " t, thrust " + ROUND(SHIP:AVAILABLETHRUST) +
       " kN, TWR " + ROUND(twrNow(), 2) + ", Isp " + ROUND(RKT_ISP) + " s.".
 
+// How steeply to leave the handover.  A ship with thrust to spare is through
+// the drag layer in seconds and should spend its nose on speed; a ship at TWR
+// 1.1 burns for a minute and a half and has to climb or it will sink back into
+// the air before apoapsis.  Deriving it beats a constant that is right for one
+// airframe.
+SET ccFpaHi TO CC_FPA_HI.
+IF ccFpaHi <= 0 {
+  SET ccFpaHi TO clampVal(CC_FPA_TWR_A - CC_FPA_TWR_B * twrNow(), 5, 20).
+}
+SET swAlt TO SHIP:ALTITUDE.
+PRINT "  Initial climb command " + ROUND(ccFpaHi, 1) + " deg, flattening to " +
+      ROUND(CC_FPA_FLAT, 1) + " deg by " + ROUND(CC_FLAT_ALT / 1000) + " km.".
+
 SET aoaTrim   TO 0.                 // fresh trim: different regime, different AoA
 SET fpaBias   TO 0.
+SET emergency TO FALSE.             // orbit priced out: fly for periapsis instead
 SET lastLoopT TO TIME:SECONDS.
 SET lastAccT  TO TIME:SECONDS.
 SET lastPolT  TO TIME:SECONDS.
@@ -1208,16 +1425,20 @@ UNTIL ccDone {
 
   IF SHIP:APOAPSIS >= targetAp { SET ccDone TO TRUE. BREAK. }
 
-  // ---- acceleration sampling: the same accelerate-first bias ---------------
+  // ---- acceleration sampling: a one-way bias, shallower only ---------------
   IF nowT - lastAccT >= CC_ACC_DT {
     LOCAL accDt IS nowT - lastAccT.
     SET lastAccT TO nowT.
     SET accelNow TO (SHIP:VELOCITY:ORBIT:MAG - lastSpd) / accDt.
     SET lastSpd  TO SHIP:VELOCITY:ORBIT:MAG.
+    // The bias only ever shallows.  Spare acceleration is never a reason to
+    // point the nose further from the horizon: above the drag layer a steeper
+    // climb costs cos(gamma) of the thrust and g*sin(gamma) of gravity loss to
+    // buy altitude the engine could buy more cheaply as orbital speed.
     IF accelNow < CC_ACC_LOW {
       SET fpaBias TO MAX(fpaBias - CC_BIAS_STEP, -CC_BIAS_DOWN).
-    } ELSE IF accelNow > CC_ACC_HIGH {
-      SET fpaBias TO MIN(fpaBias + CC_BIAS_STEP, CC_BIAS_UP).
+    } ELSE {
+      SET fpaBias TO MIN(0, fpaBias + CC_BIAS_STEP).
     }
   }
 
@@ -1229,11 +1450,38 @@ UNTIL ccDone {
   IF targetAp > apAtSwitch {
     SET prog TO clampVal((SHIP:APOAPSIS - apAtSwitch) / (targetAp - apAtSwitch), 0, 1).
   }
-  LOCAL fpaWant IS CC_FPA_HI + (CC_FPA_LO - CC_FPA_HI) * prog + fpaBias.
+  LOCAL fpaWant IS ccFpaHi + (CC_FPA_LO - ccFpaHi) * prog + fpaBias.
+
+  //  A second, independent cap on altitude.  The *only* reason to climb under
+  //  power is to get out of air that is charging for the speed we are buying;
+  //  once that air is gone the climb has no payer left, so the command is
+  //  capped by a schedule that decays from the handover altitude to CC_FPA_FLAT
+  //  by CC_FLAT_ALT.  Whichever of the two schedules is shallower wins.
+  LOCAL altFrac IS clampVal((CC_FLAT_ALT - SHIP:ALTITUDE) /
+                            MAX(1, CC_FLAT_ALT - swAlt), 0, 1).
+  SET fpaWant TO MIN(fpaWant, CC_FPA_FLAT + (ccFpaHi - CC_FPA_FLAT) * altFrac).
+
+  //  Emergency: the orbit has been priced out of reach.  Raising apoapsis now
+  //  actively hurts - it makes the circularisation we already cannot afford
+  //  more expensive - so the objective changes to the highest periapsis the
+  //  remaining fuel can buy, and that is bought by burning flat.
+  IF emergency { SET fpaWant TO MIN(fpaWant, CC_FPA_FLAT). }
+
   IF SHIP:ALTITUDE < ATM_TOP {
-    // Whatever the bias says, we are leaving the atmosphere.
+    // Whatever the caps say, we are leaving the atmosphere.
     SET fpaWant TO MAX(fpaWant, vsToFpa(CC_VS_ATM_MIN)).
   }
+
+  //  Floor: never let the apex arrive before the burn does.  A ship that tops
+  //  out and starts falling mid-burn pays for the same altitude twice.  This is
+  //  the one place a time is used, and it is the smooth vs/g_eff estimate, not
+  //  ETA:APOAPSIS - and g_eff is gravity net of centrifugal relief, which at
+  //  1800 m/s is over half of it.
+  LOCAL tapShort IS CC_TAP_MIN - apexTimeEst().
+  IF tapShort > 0 {
+    SET fpaWant TO fpaWant + clampVal(CC_TAP_GAIN * tapShort, 0, CC_TAP_MAX_ADD).
+  }
+
   SET pitchCmd TO steerFpa(fpaWant, CC_PITCH_MIN, CC_PITCH_MAX, dtStep).
 
   // ---- dV policing --------------------------------------------------------
@@ -1243,15 +1491,39 @@ UNTIL ccDone {
 
     // Floor 1: an orbit is genuinely in reach, so the deorbit money is real
     // money.  Stop climbing and bank the orbit we can still pay to leave.
+    //
+    // The two halves of that test are not the same question, and conflating
+    // them is what stranded the reference flight.  Money must only be reserved
+    // for a deorbit burn we are actually going to need, i.e. one from an orbit
+    // we can still afford to close.  If the circularisation itself is already
+    // out of reach, there is no orbit to leave, so there is nothing to reserve
+    // and nothing is gained by cutting the engine here - climbing higher only
+    // makes the circularisation dearer.  Fly flat for periapsis instead.
     IF SHIP:APOAPSIS >= MIN_ORBIT_ALT {
-      LOCAL keep IS circDvAt(SHIP:APOAPSIS) + reserveDvFor(SHIP:APOAPSIS).
-      IF dvNow <= keep {
+      LOCAL circHere IS circDvAt(SHIP:APOAPSIS).
+      IF dvNow <= circHere + reserveDvFor(SHIP:APOAPSIS) AND dvNow > circHere {
         SET settled TO TRUE.
         SET stopReason TO "stopped on the circularise + deorbit reserve".
         SET targetAp TO SHIP:APOAPSIS.
         SET ccDone TO TRUE.
         BREAK.
       }
+      IF dvNow <= circHere AND NOT emergency {
+        SET emergency TO TRUE.
+        PRINT "  Cannot afford to circularise at " + ROUND(SHIP:APOAPSIS / 1000, 1) +
+              " km (" + ROUND(dvNow) + " m/s vs " + ROUND(circHere) + ").".
+        PRINT "  Flying flat for the highest periapsis the fuel will buy.".
+      }
+    }
+
+    // Flying flat can succeed: periapsis climbing clear of the air *is* an
+    // orbit, and there is nothing left to buy up here.
+    IF emergency AND SHIP:PERIAPSIS >= MIN_ORBIT_ALT {
+      SET settled TO TRUE.
+      SET stopReason TO "periapsis reached orbit on the flat burn".
+      SET targetAp TO SHIP:APOAPSIS.
+      SET ccDone TO TRUE.
+      BREAK.
     }
 
     // Floor 2: absolute. Whatever else is true, the ship keeps a glide reserve.
@@ -1305,11 +1577,16 @@ UNTIL ccDone {
             IF ABORT_IF_INFEASIBLE {
               PRINT "   Cutting the burn now and keeping the remaining fuel.".
             } ELSE {
-              PRINT "   Flying on to the hard floors; the glide reserve is protected.".
+              PRINT "   Levelling off: every remaining m/s now goes into periapsis,".
+              PRINT "   not apoapsis. The glide reserve is still protected.".
             }
             PRINT "======================================================".
             SET infeasWarned TO TRUE.
           }
+          // Apoapsis has stopped being the objective.  Height we cannot pay to
+          // circularise at is height that has to be shed again on reentry; the
+          // remaining fuel is worth far more spent flat, raising periapsis.
+          SET emergency TO TRUE.
           IF ABORT_IF_INFEASIBLE {
             SET settled TO TRUE.
             SET stopReason TO "aborted - orbit priced out of reach".
@@ -1330,6 +1607,10 @@ UNTIL ccDone {
     PRINT "      fpa " + ROUND(fpaNow(), 1) + "/" + ROUND(fpaWant, 1) + " | pitch " +
           ROUND(pitchCmd, 1) + " | acc " + ROUND(accelNow, 2) + " | TWR " +
           ROUND(twrNow(), 2) + " | dV " + ROUND(rocketDv()).
+    LOCAL flatNote IS "".
+    IF emergency { SET flatNote TO " | FLAT-BURN (orbit priced out)". }
+    PRINT "      PE " + ROUND(SHIP:PERIAPSIS / 1000, 1) + " km | apex in " +
+          ROUND(MIN(999, apexTimeEst())) + " s" + flatNote.
     SET reportT TO nowT.
   }
 
@@ -1361,7 +1642,22 @@ IF orbitAlt < ATM_TOP + 2000 {
 
 IF NOT abortSuborbital {
   LOCK STEERING TO SHIP:PROGRADE.
-  WAIT UNTIL SHIP:ALTITUDE > ATM_TOP.        // clear of the atmosphere
+  // Clear of the atmosphere - but never wait on that unconditionally.  If the
+  // ship is already past apoapsis and coming down, that condition will never
+  // become true and the autopilot would hold the ship nose-prograde all the way
+  // into the ground.
+  WAIT UNTIL SHIP:ALTITUDE > ATM_TOP OR SHIP:VERTICALSPEED < 0.
+  IF SHIP:ALTITUDE < ATM_TOP {
+    SET abortSuborbital TO TRUE.
+    PRINT "!! Apoapsis passed inside the atmosphere - no vacuum burn is possible.".
+    PRINT "   Handing back to the pilot with " + ROUND(rocketDv()) + " m/s in hand.".
+    UNLOCK STEERING.
+    UNLOCK THROTTLE.
+    SAS ON.
+  }
+}
+
+IF NOT abortSuborbital {
 
   // -------------------------------------------------------------------------
   //  5. CIRCULARISE  --  and stop at the deorbit reserve, whatever happens
@@ -1383,7 +1679,10 @@ IF NOT abortSuborbital {
     WAIT 3.
   }
 
-  WAIT UNTIL ETA:APOAPSIS < circLead OR SHIP:PERIAPSIS > ATM_TOP.
+  // ETA:APOAPSIS jumps to nearly a full orbit the instant apoapsis is behind
+  // us, so the falling case has to be an exit condition of its own.
+  WAIT UNTIL ETA:APOAPSIS < circLead OR SHIP:PERIAPSIS > ATM_TOP
+             OR (SHIP:VERTICALSPEED < 0 AND SHIP:ALTITUDE < ATM_TOP).
 
   SET circPeTarget TO MAX(ATM_TOP + PE_SAFETY, orbitAlt - CIRC_PE_TOL).
   SET circPeTarget TO MIN(circPeTarget, orbitAlt - 500).
@@ -1393,7 +1692,6 @@ IF NOT abortSuborbital {
         ROUND(deorbitDvFrom(orbitAlt)) + " + margin " + ROUND(DV_MARGIN) + ").".
 
   SET circStarved TO FALSE.
-  SET circFloor   TO MAX(reserveDvFor(orbitAlt), DV_GLIDE_RESERVE).
   SET dvCheckT    TO TIME:SECONDS.
   SET thrCmd TO 1.
   UNTIL SHIP:PERIAPSIS >= circPeTarget {
@@ -1402,8 +1700,19 @@ IF NOT abortSuborbital {
 
     // Hard stop: we will not eat the deorbit money to buy a rounder orbit.
     // (Polled a few times a second - rocketDv() is not cheap in kOS.)
+    //
+    // But the deorbit reserve is only worth protecting while there is going to
+    // be an orbit to deorbit *from*.  Until periapsis is clear of the air the
+    // ship is on a reentry path already, no deorbit burn will ever be needed,
+    // and holding fuel back for one just guarantees the reentry is steeper than
+    // it had to be.  So the floor is the glide reserve until periapsis is up,
+    // and the full reserve only once it is.
     IF TIME:SECONDS - dvCheckT > 0.25 {
       SET dvCheckT TO TIME:SECONDS.
+      LOCAL circFloor IS DV_GLIDE_RESERVE.
+      IF SHIP:PERIAPSIS >= ATM_TOP {
+        SET circFloor TO MAX(reserveDvFor(orbitAlt), DV_GLIDE_RESERVE).
+      }
       IF rocketDv() <= circFloor {
         SET circStarved TO TRUE.
         BREAK.
@@ -1415,10 +1724,24 @@ IF NOT abortSuborbital {
   UNLOCK STEERING.
   SAS ON.
 
+  // Did we actually end up in orbit?  Apoapsis alone does not answer that - a
+  // ship can have a 78 km apoapsis and a periapsis 100 km underground, which is
+  // a reentry trajectory with a good view.  Periapsis clear of the atmosphere
+  // is the only test that means anything, and everything below is reported
+  // against it.
+  SET inOrbit TO SHIP:PERIAPSIS > ATM_TOP.
+
   IF circStarved {
-    PRINT "!! Circularisation stopped on the deorbit reserve.".
-    PRINT "   PE " + ROUND(SHIP:PERIAPSIS / 1000, 1) + " km - the orbit stays elliptical,".
-    PRINT "   but the deorbit burn is still funded.".
+    IF inOrbit {
+      PRINT "!! Circularisation stopped on the deorbit reserve.".
+      PRINT "   PE " + ROUND(SHIP:PERIAPSIS / 1000, 1) + " km - the orbit stays elliptical,".
+      PRINT "   but the deorbit burn is still funded.".
+    } ELSE {
+      PRINT "!! Circularisation ran out of fuel with PE " +
+            ROUND(SHIP:PERIAPSIS / 1000, 1) + " km, still inside the atmosphere.".
+      PRINT "   Everything above the glide reserve went into periapsis; the ship".
+      PRINT "   is on a reentry path and needs no deorbit burn.".
+    }
   }
 
   // -------------------------------------------------------------------------
@@ -1426,8 +1749,14 @@ IF NOT abortSuborbital {
   // -------------------------------------------------------------------------
   SET dvLeft  TO rocketDv().
   SET dvDeorb TO deorbitDvFrom(SHIP:APOAPSIS).
+  IF NOT inOrbit { SET dvDeorb TO 0. }   // nothing to deorbit from
   PRINT "======================================================".
-  IF settled {
+  IF NOT inOrbit {
+    PRINT "!! NO ORBIT. Periapsis " + ROUND(SHIP:PERIAPSIS / 1000, 1) +
+          " km is inside the atmosphere -".
+    PRINT "   this is a suborbital arc, not an orbit. The ship will reenter on".
+    PRINT "   its own; do NOT run deorbit_land. Fly it home as a glider.".
+  } ELSE IF settled {
     PRINT "ORBIT ACHIEVED (settled below the requested " +
           ROUND(REQUESTED_APOAPSIS / 1000) + " km)".
   } ELSE {
@@ -1449,7 +1778,9 @@ IF NOT abortSuborbital {
     PRINT "  Payload LF/Ox (locked out): " + ROUND(listResAmt(PAY_TANKS, "LiquidFuel")) +
           " / " + ROUND(listResAmt(PAY_TANKS, "Oxidizer")).
   }
-  IF dvLeft >= dvDeorb + DV_MARGIN {
+  IF NOT inOrbit {
+    PRINT "  No deorbit burn required - the trajectory already reenters.".
+  } ELSE IF dvLeft >= dvDeorb + DV_MARGIN {
     PRINT "  DEORBIT FUNDED - RUN deorbit_land. when you are ready.".
   } ELSE IF dvLeft >= dvDeorb {
     PRINT "  Deorbit funded but with no margin - deorbit promptly.".
