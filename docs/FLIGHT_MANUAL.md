@@ -32,10 +32,37 @@ but Group 1 is a handy manual override.
 RUN ascent.
 ```
 
-Sequence: brakes → full throttle → ignite RAPIERs (air mode) → roll → rotate at
-80 m/s → 12° air-breathing climb → force closed-cycle at 20 km / 1400 m/s →
-gravity turn to a 100 km apoapsis → coast → circularise at apoapsis → report
-leftover fuel. Hands off the whole way.
+Sequence: measure the ship (mass, weight, TWR, ΔV) and print the budget → roll →
+rotate at 80 m/s → **self-tuning** air-breathing climb → switch to closed cycle
+when the jets actually run out of breath → rocket push to the requested apoapsis
+→ coast → circularise → report. Hands off the whole way.
+
+Three things the script decides for itself:
+
+* **ΔV budget.** Before takeoff it reads the real mass, thrust, TWR and the
+  closed-cycle ΔV in the tanks (rocket equation over the usable LF/Ox pair, Isp
+  read off the live engines), and it prints what it is reserving for
+  circularisation and deorbit.
+* **Settling for a lower orbit.** It flies for `REQUESTED_APOAPSIS` (100 km by
+  default), but re-prices the trip every fraction of a second. If the remaining
+  ΔV can no longer buy *climb + circularise + deorbit + margin*, it says so.
+  Above `SETTLE_MIN_ALT` (80 km) it stops climbing and banks the orbit it can
+  afford, keeping the circularisation and deorbit ΔV intact; below 80 km it
+  warns and keeps pushing, because half an orbit is worth nothing. The
+  circularisation burn also stops dead on the deorbit reserve rather than
+  spending it — you may end up slightly elliptical, but always able to come
+  home.
+* **The flight profile.** The air-breathing pitch is *searched*, not scheduled:
+  every second the script measures the specific-energy rate dE/dt and nudges
+  pitch in whichever direction improved it, inside a dynamic-pressure corridor.
+  The mode switch fires on flameout / thrust decay / acceleration collapse /
+  ceiling rather than at a fixed altitude, and the rocket phase steers to hold
+  ~35 s of time-to-apoapsis. So a heavy ship and a light one fly different,
+  appropriate profiles with no retuning.
+
+If the ship is so short of ΔV that the apoapsis never clears the atmosphere, the
+script says so, skips circularisation, and hands back a glider — no deorbit burn
+is needed from there.
 
 ### Home again
 
@@ -48,8 +75,11 @@ KSC) → burn periapsis down to ~32 km → high-AoA reentry → energy-managed g
 homing on the runway → capture heading 090 → glideslope → flare → gear down →
 touchdown → brake to a stop.
 
-Both scripts expose their tunables at the top — trim `ROTATE_SPEED`,
-`SWITCH_ALT/SPEED`, `DEORBIT_LEAD`, `GLIDE_SPEED`, `FLARE_ALT`, etc. to taste.
+Both scripts expose their tunables at the top — trim `REQUESTED_APOAPSIS`,
+`ROTATE_SPEED`, `DV_MARGIN`, `SETTLE_MIN_ALT`, `TGT_ETA_AP`, `DEORBIT_LEAD`,
+`GLIDE_SPEED`, `FLARE_ALT`, etc. to taste. `DEORBIT_PE` appears in *both*
+scripts and should match: the ascent script reserves the ΔV that the deorbit
+script will spend.
 
 ---
 
