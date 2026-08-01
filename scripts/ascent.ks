@@ -78,11 +78,13 @@
 //  Flight plan
 //    0. Pre-flight  : map the fuel network, isolate the payload, print budget.
 //    1. Runway roll : hold heading, rotate at ROTATE_SPEED.
-//    2. Air-breathing climb: accelerate-first vertical-speed profile.
+//    2. Air-breathing climb: self-tuning dynamic-pressure corridor.
 //    3. Closed-cycle push  : flight-path-angle schedule, measured dV policing.
 //    4. Coast       : throttle 0, warp to the circularisation burn.
 //    5. Circularise : burn prograde at apoapsis, stop at the deorbit reserve.
 //    6. Report      : final orbit, dV left, deorbit funding check.
+//    7. Post-flight : re-price the mission from what the ship actually did and
+//                     say what the airframe needs changing.
 //
 //  Run with:   RUN ascent.          - 100 km, the default
 //              RUN ascent(150000).  - or any apoapsis, in metres
@@ -199,6 +201,7 @@ SET AB_Q_ADAPT      TO TRUE.        // FALSE = hold AB_Q_TARGET exactly
 SET AB_ACC_TARGET   TO 1.5.         // acceleration the jet phase aims to hold (m/s^2)
 SET AB_Q_ADAPT_DT   TO 10.          // outer-loop interval (s)
 SET AB_Q_ADAPT_STEP TO 0.06.        // fractional move of the target per interval
+SET AB_Q_ADAPT_BAND TO 0.15.        // dead band around AB_ACC_TARGET, fractional
 SET AB_Q_TGT_MIN    TO 0.10.        // ... clamped, thin end (atm)
 SET AB_Q_TGT_MAX    TO 0.45.        // ... clamped, thick end (atm)
 SET AB_Q_ADAPT_TOL  TO 0.25.        // only trim when |ln(Q/target)| is under this
@@ -1320,7 +1323,7 @@ GEAR OFF.
 WAIT UNTIL SHIP:AIRSPEED > AB_GUIDE_SPEED.
 
 // ---------------------------------------------------------------------------
-//  2. AIR-BREATHING CLIMB  --  accelerate first, climb with the change
+//  2. AIR-BREATHING CLIMB  --  ride a dynamic-pressure corridor
 // ---------------------------------------------------------------------------
 //  One commanded quantity: vertical speed, and one thing it is trying to do -
 //  hold dynamic pressure at AB_Q_TARGET while the ship accelerates.  Q is the
@@ -1393,10 +1396,13 @@ UNTIL switchNow {
     // rather than where a constant guessed they would.
     IF AB_Q_ADAPT AND nowT - lastQTrimT >= AB_Q_ADAPT_DT {
       SET lastQTrimT TO nowT.
+      // The dead band matters: without one the target steps every interval
+      // whatever the ship is doing, and settles into a permanent +-6% hunt
+      // around the right answer instead of stopping on it.
       IF ABS(LN(qNow / qTgt)) < AB_Q_ADAPT_TOL {
-        IF accelSm > AB_ACC_TARGET {
+        IF accelSm > AB_ACC_TARGET * (1 + AB_Q_ADAPT_BAND) {
           SET qTgt TO qTgt * (1 - AB_Q_ADAPT_STEP).   // room to spare: go thinner
-        } ELSE {
+        } ELSE IF accelSm < AB_ACC_TARGET * (1 - AB_Q_ADAPT_BAND) {
           SET qTgt TO qTgt * (1 + AB_Q_ADAPT_STEP).   // starving: come back down
         }
         SET qTgt TO clampVal(qTgt, AB_Q_TGT_MIN, AB_Q_TGT_MAX).
@@ -1528,6 +1534,7 @@ SET RKT_ISP TO measureRocketIsp().  // now the live engines quote rocket Isp
 
 SET targetAp    TO REQUESTED_APOAPSIS.
 SET lossFactor  TO CLIMB_LOSS_FACTOR.   // replaced by the measured value below
+SET lossMeasured TO FALSE.              // ...if the burn lasts long enough to arm it
 SET apAtSwitch  TO SHIP:APOAPSIS.
 SET dvAtSwitch  TO rocketDv().
 // The efficiency yardstick is pinned to a fixed reference altitude, not to the
@@ -1705,6 +1712,7 @@ UNTIL ccDone {
       } ELSE {
         SET lossFactor TO 12.       // spending dV and buying nothing
       }
+      SET lossMeasured TO TRUE.
 
       IF dvNow < priceOfOrbit(targetAp, lossFactor) {
         SET infeasVotes TO infeasVotes + 1.
@@ -1813,10 +1821,6 @@ IF NOT abortSuborbital {
 }
 
 IF NOT abortSuborbital {
-
-  // -------------------------------------------------------------------------
-  //  5. CIRCULARISE  --  and stop at the deorbit reserve, whatever happens
-  // -------------------------------------------------------------------------
   SET circDv   TO circDvAt(orbitAlt).
   SET circBurn TO burnTimeFor(circDv).
   SET circLead TO clampVal(circBurn / 2, 5, 150).
@@ -1839,6 +1843,27 @@ IF NOT abortSuborbital {
   WAIT UNTIL ETA:APOAPSIS < circLead OR SHIP:PERIAPSIS > ATM_TOP
              OR (SHIP:VERTICALSPEED < 0 AND SHIP:ALTITUDE < ATM_TOP).
 
+  // ...and having made it an exit condition, it must not fall straight through
+  // into the burn.  Apoapsis is behind us and the ship is back in the air:
+  // prograde now points downwards, so a "circularisation" burn would drive the
+  // nose into the descent and spend the glide reserve doing it.
+  IF SHIP:VERTICALSPEED < 0 AND SHIP:ALTITUDE < ATM_TOP AND SHIP:PERIAPSIS < ATM_TOP {
+    SET abortSuborbital TO TRUE.
+    PRINT "!! Descending back into the atmosphere with apoapsis behind us -".
+    PRINT "   there is no circularisation to make. Keeping " + ROUND(rocketDv()) +
+          " m/s and handing back for the glide.".
+    SET thrCmd TO 0.
+    UNLOCK STEERING.
+    UNLOCK THROTTLE.
+    SAS ON.
+  }
+}
+
+// ---------------------------------------------------------------------------
+//  5. CIRCULARISE  --  and stop at the deorbit reserve, whatever happens
+// ---------------------------------------------------------------------------
+SET circStarved TO FALSE.
+IF NOT abortSuborbital {
   SET circPeTarget TO MAX(ATM_TOP + PE_SAFETY, orbitAlt - CIRC_PE_TOL).
   SET circPeTarget TO MIN(circPeTarget, orbitAlt - 500).
   PRINT "Circularising at " + ROUND(orbitAlt / 1000, 1) + " km; PE target " +
@@ -1846,7 +1871,6 @@ IF NOT abortSuborbital {
   PRINT "  Protecting " + ROUND(reserveDvFor(orbitAlt)) + " m/s (deorbit " +
         ROUND(deorbitDvFrom(orbitAlt)) + " + margin " + ROUND(DV_MARGIN) + ").".
 
-  SET circStarved TO FALSE.
   SET dvCheckT    TO TIME:SECONDS.
   SET thrCmd TO 1.
   UNTIL SHIP:PERIAPSIS >= circPeTarget {
@@ -1878,73 +1902,88 @@ IF NOT abortSuborbital {
   SET thrCmd TO 0.
   UNLOCK STEERING.
   SAS ON.
-
-  // Did we actually end up in orbit?  Apoapsis alone does not answer that - a
-  // ship can have a 78 km apoapsis and a periapsis 100 km underground, which is
-  // a reentry trajectory with a good view.  Periapsis clear of the atmosphere
-  // is the only test that means anything, and everything below is reported
-  // against it.
-  SET inOrbit TO SHIP:PERIAPSIS > ATM_TOP.
-
-  IF circStarved {
-    IF inOrbit {
-      PRINT "!! Circularisation stopped on the deorbit reserve.".
-      PRINT "   PE " + ROUND(SHIP:PERIAPSIS / 1000, 1) + " km - the orbit stays elliptical,".
-      PRINT "   but the deorbit burn is still funded.".
-    } ELSE {
-      PRINT "!! Circularisation ran out of fuel with PE " +
-            ROUND(SHIP:PERIAPSIS / 1000, 1) + " km, still inside the atmosphere.".
-      PRINT "   Everything above the glide reserve went into periapsis; the ship".
-      PRINT "   is on a reentry path and needs no deorbit burn.".
-    }
-  }
-
-  // -------------------------------------------------------------------------
-  //  6. REPORT
-  // -------------------------------------------------------------------------
-  SET dvLeft  TO rocketDv().
-  SET dvDeorb TO deorbitDvFrom(SHIP:APOAPSIS).
-  IF NOT inOrbit { SET dvDeorb TO 0. }   // nothing to deorbit from
-  PRINT "======================================================".
-  IF NOT inOrbit {
-    PRINT "!! NO ORBIT. Periapsis " + ROUND(SHIP:PERIAPSIS / 1000, 1) +
-          " km is inside the atmosphere -".
-    PRINT "   this is a suborbital arc, not an orbit. The ship will reenter on".
-    PRINT "   its own; do NOT run deorbit_land. Fly it home as a glider.".
-  } ELSE IF settled {
-    PRINT "ORBIT ACHIEVED (settled below the requested " +
-          ROUND(REQUESTED_APOAPSIS / 1000) + " km)".
-  } ELSE {
-    PRINT "ORBIT ACHIEVED".
-  }
-  PRINT "  Apoapsis   : " + ROUND(SHIP:APOAPSIS / 1000, 2) + " km".
-  PRINT "  Periapsis  : " + ROUND(SHIP:PERIAPSIS / 1000, 2) + " km".
-  PRINT "  Inclination: " + ROUND(SHIP:ORBIT:INCLINATION, 2) + " deg".
-  PRINT "  Mass       : " + ROUND(SHIP:MASS, 1) + " t  (burned " +
-        ROUND(launchMass - SHIP:MASS, 1) + " t)".
-  PRINT "  Climb loss : x" + ROUND(lossFactor, 2) + " vs the impulsive estimate".
-  PRINT "  dV left    : " + ROUND(dvLeft) + " m/s  (our tanks only)".
-  PRINT "  Deorbit    : " + ROUND(dvDeorb) + " m/s  ->  spare after deorbit " +
-        ROUND(dvLeft - dvDeorb) + " m/s".
-  PRINT "  Fuel -- LF: " + ROUND(coreResAmt("LiquidFuel")) +
-        " , Ox: " + ROUND(coreResAmt("Oxidizer")) +
-        " , Mono: " + ROUND(resAmtShip("MonoPropellant")).
-  IF PAY_TANKS:LENGTH > 0 {
-    PRINT "  Payload LF/Ox (locked out): " + ROUND(listResAmt(PAY_TANKS, "LiquidFuel")) +
-          " / " + ROUND(listResAmt(PAY_TANKS, "Oxidizer")).
-  }
-  IF NOT inOrbit {
-    PRINT "  No deorbit burn required - the trajectory already reenters.".
-  } ELSE IF dvLeft >= dvDeorb + DV_MARGIN {
-    PRINT "  DEORBIT FUNDED - RUN deorbit_land. when you are ready.".
-  } ELSE IF dvLeft >= dvDeorb {
-    PRINT "  Deorbit funded but with no margin - deorbit promptly.".
-  } ELSE {
-    PRINT "  !! DEORBIT NOT FUNDED - refuel, or lower PE on RCS monopropellant.".
-  }
-  PRINT "======================================================".
-  PRINT "Autopilot complete. Ship handed back to pilot (SAS on).".
 }
+
+// ---------------------------------------------------------------------------
+//  6. REPORT  --  unconditionally.  Every abort path above ends the flight
+//  somewhere the pilot has to fly out of, and "what state am I in, and with how
+//  much fuel" is exactly the question those paths leave open.  The banners above
+//  say why the ascent stopped; this says where it stopped.
+// ---------------------------------------------------------------------------
+// Did we actually end up in orbit?  Apoapsis alone does not answer that - a
+// ship can have a 78 km apoapsis and a periapsis 100 km underground, which is
+// a reentry trajectory with a good view.  Periapsis clear of the atmosphere is
+// the only test that means anything, and everything below is reported against it.
+SET inOrbit TO SHIP:PERIAPSIS > ATM_TOP.
+
+IF circStarved {
+  IF inOrbit {
+    PRINT "!! Circularisation stopped on the deorbit reserve.".
+    PRINT "   PE " + ROUND(SHIP:PERIAPSIS / 1000, 1) + " km - the orbit stays elliptical,".
+    PRINT "   but the deorbit burn is still funded.".
+  } ELSE {
+    PRINT "!! Circularisation ran out of fuel with PE " +
+          ROUND(SHIP:PERIAPSIS / 1000, 1) + " km, still inside the atmosphere.".
+    PRINT "   Everything above the glide reserve went into periapsis; the ship".
+    PRINT "   is on a reentry path and needs no deorbit burn.".
+  }
+}
+
+SET dvLeft  TO rocketDv().
+SET dvDeorb TO deorbitDvFrom(SHIP:APOAPSIS).
+IF NOT inOrbit { SET dvDeorb TO 0. }   // nothing to deorbit from
+PRINT "======================================================".
+IF NOT inOrbit {
+  PRINT "!! NO ORBIT. Periapsis " + ROUND(SHIP:PERIAPSIS / 1000, 1) +
+        " km is inside the atmosphere -".
+  PRINT "   this is a suborbital arc, not an orbit. The ship will reenter on".
+  PRINT "   its own; do NOT run deorbit_land. Fly it home as a glider.".
+} ELSE IF settled {
+  PRINT "ORBIT ACHIEVED (settled below the requested " +
+        ROUND(REQUESTED_APOAPSIS / 1000) + " km)".
+} ELSE {
+  PRINT "ORBIT ACHIEVED".
+}
+PRINT "  Apoapsis   : " + ROUND(SHIP:APOAPSIS / 1000, 2) + " km".
+PRINT "  Periapsis  : " + ROUND(SHIP:PERIAPSIS / 1000, 2) + " km".
+PRINT "  Inclination: " + ROUND(SHIP:ORBIT:INCLINATION, 2) + " deg".
+PRINT "  Mass       : " + ROUND(SHIP:MASS, 1) + " t  (burned " +
+      ROUND(launchMass - SHIP:MASS, 1) + " t)".
+IF lossMeasured {
+  PRINT "  Climb loss : x" + ROUND(lossFactor, 2) + " vs the impulsive estimate".
+} ELSE {
+  PRINT "  Climb loss : not measured (rocket burn shorter than " +
+        ROUND(FEAS_ARM_DV) + " m/s)".
+}
+PRINT "  dV left    : " + ROUND(dvLeft) + " m/s  (our tanks only)".
+PRINT "  Deorbit    : " + ROUND(dvDeorb) + " m/s  ->  spare after deorbit " +
+      ROUND(dvLeft - dvDeorb) + " m/s".
+PRINT "  Fuel -- LF: " + ROUND(coreResAmt("LiquidFuel")) +
+      " , Ox: " + ROUND(coreResAmt("Oxidizer")) +
+      " , Mono: " + ROUND(resAmtShip("MonoPropellant")).
+IF PAY_TANKS:LENGTH > 0 {
+  PRINT "  Payload LF/Ox (locked out): " + ROUND(listResAmt(PAY_TANKS, "LiquidFuel")) +
+        " / " + ROUND(listResAmt(PAY_TANKS, "Oxidizer")).
+}
+IF NOT inOrbit {
+  PRINT "  No deorbit burn required - the trajectory already reenters.".
+} ELSE IF dvLeft >= dvDeorb + DV_MARGIN {
+  PRINT "  DEORBIT FUNDED - RUN deorbit_land. when you are ready.".
+} ELSE IF dvLeft >= dvDeorb {
+  PRINT "  Deorbit funded but with no margin - deorbit promptly.".
+} ELSE {
+  PRINT "  !! DEORBIT NOT FUNDED - refuel, or lower PE on RCS monopropellant.".
+}
+PRINT "======================================================".
+PRINT "Autopilot complete. Ship handed back to pilot (SAS on).".
+
+// Hand the controls back for real.  On the abort paths this already happened;
+// on the normal path the throttle was still LOCKed to thrCmd, and leaving a
+// lock behind after the program ends is how a pilot finds the stick dead.
+// PILOTMAINTHROTTLE was zeroed on the runway, so nothing lights up here.
+SET thrCmd TO 0.
+UNLOCK THROTTLE.
+UNLOCK STEERING.
 
 // ---------------------------------------------------------------------------
 //  7. POST-FLIGHT  --  what would this ship need, going by what it just did?
@@ -1967,7 +2006,15 @@ IF jetLfUsed > 0 {
   PRINT "    SET PLAN_SWITCH_SPD  TO " + ROUND(swSpeed / 10) * 10 + ".".
   PRINT "    SET PLAN_JET_DV      TO " + ROUND(jetDvReal / 10) * 10 +
         ".   // was " + ROUND(planJetDv).
-  PRINT "    SET PLAN_LOSS_FACTOR TO " + ROUND(lossFactor, 2) + ".".
+  IF lossMeasured {
+    PRINT "    SET PLAN_LOSS_FACTOR TO " + ROUND(lossFactor, 2) + ".".
+  } ELSE {
+    // The efficiency yardstick only arms after FEAS_ARM_DV of rocket burn.  A
+    // short push never armed it, so lossFactor is still the default it was
+    // seeded with - quoting that back as a measurement would be a lie.
+    PRINT "    (climb losses not measured - the rocket burn was under " +
+          ROUND(FEAS_ARM_DV) + " m/s, so PLAN_LOSS_FACTOR is unchanged.)".
+  }
 
   // Re-price the mission the way the pre-flight check does, but with the jet
   // phase's *measured* appetite and the *measured* climb losses.  Everything
@@ -2014,7 +2061,7 @@ IF jetLfUsed > 0 {
             ". - that orbit this ship can already afford.".
     }
   }
-  IF lossFactor > 2 {
+  IF lossMeasured AND lossFactor > 2 {
     PRINT "  !! Climb losses of x" + ROUND(lossFactor, 2) + " are TWR-bound, not".
     PRINT "     guidance-bound. Closed-cycle TWR was " + ROUND(twrAtSwitch, 2) +
           " at the handover; another".
