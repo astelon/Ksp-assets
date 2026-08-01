@@ -70,14 +70,25 @@ is needed from there.
 RUN deorbit_land.
 ```
 
-Sequence: orient retrograde → wait for the deorbit point (lead angle before the
-KSC) → burn periapsis down to ~32 km → high-AoA reentry → energy-managed glide
-homing on the runway → capture heading 090 → glideslope → flare → gear down →
-touchdown → brake to a stop.
+Sequence: orient retrograde → predict the deorbit point (lead angle before the
+KSC) and plant a maneuver node there → time-warp to the burn → burn periapsis
+down to ~32 km → high-AoA reentry → energy-managed glide homing on the runway →
+capture heading 090 → glideslope → flare → gear down → touchdown → brake to a
+stop.
+
+The deorbit point is *solved*, not waited out: the script scans the next two
+orbits with `POSITIONAT`, correcting for Kerbin's own rotation, bisects the
+moment the ground track is `DEORBIT_LEAD` short of the KSC, prices the burn off
+the orbit it will be on at that instant, and warps there. It gets pointed
+retrograde *before* warping, because on rails the ship cannot rotate — and
+re-settles on the node burn vector after dropping out, since inertial attitude
+drifts away from retrograde during the coast. Warp ends `WARP_LEAD` seconds
+early to leave room for that. If no crossing is found (a wildly inclined or
+non-circular orbit), it says so and falls back to the old real-time wait.
 
 Both scripts expose their tunables at the top — trim `REQUESTED_APOAPSIS`,
 `ROTATE_SPEED`, `DV_MARGIN`, `SETTLE_MIN_ALT`, `TGT_ETA_AP`, `DEORBIT_LEAD`,
-`GLIDE_SPEED`, `FLARE_ALT`, etc. to taste. `DEORBIT_PE` appears in *both*
+`WARP_LEAD`, `GLIDE_SPEED`, `FLARE_ALT`, etc. to taste. `DEORBIT_PE` appears in *both*
 scripts and should match: the ascent script reserves the ΔV that the deorbit
 script will spend.
 
