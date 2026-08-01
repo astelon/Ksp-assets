@@ -207,6 +207,125 @@ against the old one. Two honest caveats:
   the new handover speed is made here. The +330 m/s figure at the top comes from
   the flight log's own arithmetic, not the sim.
 
+---
+
+# Part 2 — comparison with the PR #2 profile
+
+The script on `refs/pull/2/head` reached 100 km and deorbited on this airframe.
+It is 140 lines with no feedback at all, and it beat the adaptive version. That
+is worth taking seriously rather than explaining away.
+
+## What PR #2 does
+
+```kos
+SET AB_CLIMB_PITCH  TO 12.          // constant pitch, whole air-breathing phase
+SET SWITCH_ALT      TO 20000.       // switch at 20 km ...
+SET SWITCH_SPEED    TO 1400.        // ... or 1400 m/s, whichever comes first
+SET ROCKET_PITCH_HI TO 25.
+...
+LOCAL frac IS SHIP:APOAPSIS / TARGET_APOAPSIS.
+LOCAL pitchCmd IS MAX(5, ROCKET_PITCH_HI * (1 - frac) + 5).
+```
+
+Three constants and a linear fade. No dV budget, no feasibility check, no
+re-targeting, no floors, no state estimation.
+
+## Why it won
+
+**It flew a shallow climb.** This is the whole thing. A flat 12° pitch is roughly
+an 8° flight path at cruise AoA:
+
+| airspeed | PR #2 (~8° path) | reference flight (28° pitch) |
+|---|---|---|
+| 400 m/s | 56 m/s | 163 m/s |
+| 800 m/s | 111 m/s | 325 m/s |
+| 1200 m/s | 167 m/s | 488 m/s |
+
+At 800 m/s and 1.5 m/s² of acceleration, PR #2 climbs **7.4 km** per 100 m/s of
+speed gained. The reference flight climbed **21.7 km**. That is why one arrived
+at the switch with air still going into the intakes and the other arrived at
+24 km with the jets at 25% thrust.
+
+**Its switch always fires.** `alt > 20 km OR airspeed > 1400` cannot deadlock.
+The adaptive version's arming gate could, and did.
+
+**It has nothing that can refuse to make progress.** Every failure mode found in
+Part 1 — the disarmed switch, the dive loop, the MECO floor that cut the engine
+without helping, the "cannot reach orbit" warning followed by 606 m/s of
+climbing anyway — is a *decision* the simple script never makes. Complexity that
+can veto progress is worse than no complexity.
+
+## Where PR #2 is genuinely worse
+
+Not things to copy back:
+
+- `STAGE.` unconditionally — on a craft with a payload separator, that drops the
+  cargo on the runway.
+- **`resAmt()` is broken**: `SET t TO r:AMOUNT` overwrites instead of
+  accumulating, so the fuel report shows only the last tank found.
+- Counts payload fuel as its own, and lets the engines drink it.
+- No dV policing anywhere. It will burn the tanks dry to circularise and leave
+  nothing to deorbit with — it only got home because there happened to be fuel
+  left.
+- `PRINT "ORBIT ACHIEVED"` unconditionally, with no periapsis check. Same bug as
+  Part 1, in a script that just cannot notice.
+- Kerbin hardcoded throughout: 70000, 68000, 99000, 20000.
+- Commands *pitch*, not flight path, so its climb angle silently changes with
+  mass and air density. It works on the airframe it was tuned for.
+
+That last point is the real trade. PR #2's 12° is right for this ship; it is not
+derived from anything, so on a different SSTO it is a guess.
+
+## What was changed as a result
+
+**The climb cap came down to PR #2's proven band.** `AB_FPA_MAX` 22° → **12°**,
+and it is now clearly separated from `AB_PITCH_MAX` (28° → 25°). These are
+different quantities: flight path is the physics that decides whether the jets
+get fed; pitch is mostly the angle of attack the trim needs to fly at all.
+Conflating them is how the reference flight sat on a pitch limit and called it
+guidance. The old `AB_FPA_MAX` of 22° was barely better than the 28° that failed.
+
+**The switch is now guaranteed to terminate.** The priced test is still the
+primary decision, but it provably does not always fire: in level flight the jets
+stay genuinely cheaper per m/s down to a crawl, so on paper the ship cruises
+forever buying 0.2 m/s². Three backstops now bound it, in PR #2's spirit:
+`SW_ALT_HARD` 28 km → **25 km**, a new `SW_Q_HARD` at **0.04 atm** (the intakes
+are starved regardless of what the economics say), and `SW_MIN_ACCEL` at
+0.25 m/s². In simulation the acceleration floor fires where the priced test
+alone would have cruised indefinitely.
+
+**The Q target is no longer a constant.** This is the answer to "it is
+hardcoded", and it applies to *my* 0.30 as much as to PR #2's 12°. The right
+dynamic pressure depends on how a build's drag trades against its intake area,
+which the script can measure. An outer loop now trims the target every 10 s
+against sustained acceleration — plenty of acceleration means the ship can
+afford thinner air, sagging acceleration means it is starving and must come back
+down — clamped to 0.10–0.45 atm and only trimmed while the inner loop is
+actually holding the corridor, so the two cannot wind against each other. In
+simulation it pins against a clamp rather than running away when the airframe
+cannot meet the acceleration target, which is the correct degenerate behaviour.
+
+**A post-flight sizing report.** The pre-flight check answers "what does this
+ship need?" from a model. After the flight every assumption in that model has a
+measured counterpart, so the same solvers are re-run with the real jet fuel
+fraction, the real handover state and the real loss factor. It prints the
+calibration constants to paste back, then concrete advice — add this much LF, or
+this much LF/Ox plus tankage, or fly this much lighter, or set
+`REQUESTED_APOAPSIS` to the orbit the ship can already afford. If losses came out
+above ×2 it says so and points at TWR, because no profile change fixes that.
+
+## The synthesis
+
+PR #2 is a good *envelope* and a bad *autopilot*. The closed-loop version is the
+right architecture — it is the only one that can measure a ship it has not seen
+before and tell you what is wrong with it — but it needed PR #2's discipline
+bolted on: bounded attitude, guaranteed termination, and no test that can veto
+progress. Every adaptive decision in the script now has a fallback that fires on
+its own, and the two hard limits it flies inside (12° climb, 25 km ceiling) are
+the ones the working profile demonstrated.
+
+---
+
 ## The part the script cannot fix
 
 The vehicle is the binding constraint. 72 t of payload on 270 t is a **27%

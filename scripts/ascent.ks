@@ -148,17 +148,43 @@ SET AOA_TRIM_MAX TO 14.             // trim authority clamp (deg)
 SET ROTATE_SPEED    TO 80.          // surface speed to rotate the nose up (m/s)
 SET ROTATE_PITCH    TO 10.          // fixed pitch used until guidance engages (deg)
 SET AB_GUIDE_SPEED  TO 160.         // hand over to the vs controller above this (m/s)
+//  Two separate limits, and the distinction matters.  AB_FPA_MAX bounds how
+//  steeply the ship may *climb* - that is the physics, and it is the number
+//  that decides whether the jets get fed.  AB_PITCH_MAX only bounds where the
+//  nose may point, which at low speed is mostly angle of attack the trim needs
+//  in order to fly at all.  Conflating them is what let the reference flight
+//  sit on a 28 deg pitch limit and call it guidance.
+//
+//  The 12 deg cap is taken from the profile that actually reached orbit on this
+//  airframe: a flat 12 deg *pitch* command, which at cruise AoA is roughly an
+//  8 deg flight path.  At 800 m/s that ship climbed 7.4 km per 100 m/s of speed
+//  gained; the reference flight, at 28 deg, climbed 21.7 km for the same 100
+//  m/s.  That ratio is the entire difference between the two flights.
 SET AB_PITCH_MIN    TO -6.          // pitch clamp, air-breathing phase (deg)
-SET AB_PITCH_MAX    TO 28.
-SET AB_FPA_MAX      TO 22.          // commanded flight path never steeper (deg);
-                                    // keeps the vs command flyable so the AoA
-                                    // trim cannot wind up against the clamp
+SET AB_PITCH_MAX    TO 25.          // ... nose authority, not a climb limit
+SET AB_FPA_MAX      TO 12.          // commanded flight path never steeper (deg)
 SET AB_TUNE_DT      TO 1.           // profile re-scheduling interval (s)
 SET AB_VS_MAX       TO 200.         // commanded climb rate, clamp (m/s)
 SET AB_VS_RATE      TO 25.          // how fast the command may move (m/s per s)
-SET AB_Q_TARGET     TO 0.30.        // dynamic pressure the corridor holds (atm)
+SET AB_Q_TARGET     TO 0.30.        // dynamic pressure the corridor starts on (atm)
 SET AB_Q_KP         TO 0.04.        // corridor gain (1/s) on ln(Q/Qtarget)
 SET AB_ACC_SMOOTH   TO 0.4.         // low-pass on measured accel, 0..1 (1 = raw)
+
+//  The corridor's outer loop: which Q is right for *this* airframe?  A fixed
+//  number cannot answer that - it depends on how the ship's drag trades against
+//  its intake area, which is a property of the build.  So the target is trimmed
+//  slowly against sustained acceleration: plenty of acceleration means the ship
+//  can afford thinner air (less drag, more efficient), and sagging acceleration
+//  means it is starving and needs to come back down.  Slow, clamped, and only
+//  trimmed while the inner loop is actually holding the corridor, so the two
+//  cannot wind against each other.
+SET AB_Q_ADAPT      TO TRUE.        // FALSE = hold AB_Q_TARGET exactly
+SET AB_ACC_TARGET   TO 1.5.         // acceleration the jet phase aims to hold (m/s^2)
+SET AB_Q_ADAPT_DT   TO 10.          // outer-loop interval (s)
+SET AB_Q_ADAPT_STEP TO 0.06.        // fractional move of the target per interval
+SET AB_Q_TGT_MIN    TO 0.10.        // ... clamped, thin end (atm)
+SET AB_Q_TGT_MAX    TO 0.45.        // ... clamped, thick end (atm)
+SET AB_Q_ADAPT_TOL  TO 0.25.        // only trim when |ln(Q/target)| is under this
 SET AB_FLOOR_ALT    TO 8000.        // hold at least AB_VS_FLOOR under this (m)
 SET AB_VS_FLOOR     TO 25.          // ... that minimum climb rate (m/s)
 SET AB_Q_MAX        TO 0.55.        // hard ceiling on Q: climb out regardless (atm)
@@ -201,8 +227,18 @@ SET SW_ARM_DECAY    TO 0.85.        // ... nor until jet thrust is under this
                                     // Thrust does not fall off peak until the
                                     // ship is genuinely high and fast, so this
                                     // costs nothing and rules that window out.
-SET SW_ALT_HARD     TO 28000.       // hard backstop: switch by this altitude (m)
+//  Backstops.  The priced test is the right answer but it is not guaranteed to
+//  terminate: in level flight the jets stay genuinely cheaper per m/s down to a
+//  crawl, so on paper the ship will cruise forever buying 0.2 m/s^2.  The
+//  profile that reached orbit on this airframe simply switched at 20 km or
+//  1400 m/s, whichever came first, and never had the problem.  These are the
+//  same idea with room for a better airframe to earn more.
+SET SW_ALT_HARD     TO 25000.       // hard backstop: switch by this altitude (m)
 SET SW_SPEED_HARD   TO 1700.        // ... or this airspeed (m/s)
+SET SW_Q_HARD       TO 0.04.        // ... or this dynamic pressure (atm).  Below
+                                    // this the intakes are starved whatever the
+                                    // economics say - the reference flight sat
+                                    // at Q 0.05 with the jets at 25% of peak.
 
 // --- Closed-cycle push ------------------------------------------------------
 SET CC_FPA_HI      TO 0.            // commanded flight-path angle at the switch
@@ -646,6 +682,32 @@ FUNCTION circDvFrom {
 FUNCTION priceOfOrbit {
   PARAMETER apAlt, lossFactor.
   RETURN dvToRaiseApTo(apAlt) * lossFactor + circDvAt(apAlt) + reserveDvFor(apAlt).
+}
+
+// The same price, but for an *assumed* handover state rather than the live one.
+// The live-state versions above are what the in-flight policing needs; these are
+// what the pre-flight and post-flight sizing advice needs, because after the
+// flight the live state is orbit and dvToRaiseApTo() would read zero.
+FUNCTION priceFromHandover {
+  PARAMETER apAlt, altM, spd, lossF.
+  RETURN dvRaiseApFrom(altM, spd, apAlt) * lossF + circDvFrom(altM, apAlt) +
+         deorbitDvFrom(apAlt) + DV_MARGIN.
+}
+
+FUNCTION affordableApFrom {
+  PARAMETER dvHave, altM, spd, lossF.
+  IF priceFromHandover(MIN_ORBIT_ALT, altM, spd, lossF) > dvHave { RETURN 0. }
+  IF priceFromHandover(REQUESTED_APOAPSIS, altM, spd, lossF) <= dvHave {
+    RETURN REQUESTED_APOAPSIS.
+  }
+  LOCAL lo IS MIN_ORBIT_ALT.
+  LOCAL hi IS REQUESTED_APOAPSIS.
+  FROM { LOCAL iter IS 0. } UNTIL iter >= 16 STEP { SET iter TO iter + 1. } DO {
+    LOCAL mid IS (lo + hi) / 2.
+    IF priceFromHandover(mid, altM, spd, lossF) <= dvHave { SET lo TO mid. }
+    ELSE { SET hi TO mid. }
+  }
+  RETURN lo.
 }
 
 // Highest apoapsis between MIN_ORBIT_ALT and REQUESTED_APOAPSIS whose full
@@ -1215,14 +1277,17 @@ WAIT UNTIL SHIP:AIRSPEED > AB_GUIDE_SPEED.
 //  that delivers the commanded climb comes from the shared flight-path
 //  controller, so the nose moves smoothly instead of hunting.
 // ---------------------------------------------------------------------------
-PRINT "Air-breathing climb: Q corridor at " + ROUND(AB_Q_TARGET, 2) + " atm.".
+PRINT "Air-breathing climb: Q corridor from " + ROUND(AB_Q_TARGET, 2) +
+      " atm, climb capped at " + ROUND(AB_FPA_MAX) + " deg.".
 // Start from the climb the ship is already flying, not from a constant: at
 // handover speed a fixed command is a 40 deg flight path, and the nose would
 // slam to the clamp before the trim had learned anything.
 SET vsCmd     TO clampVal(SHIP:VERTICALSPEED, 30, AB_VS_MAX).
+SET qTgt      TO AB_Q_TARGET.
 SET aoaTrim   TO 0.
 SET lastLoopT TO TIME:SECONDS.
 SET lastTuneT TO TIME:SECONDS.
+SET lastQTrimT TO TIME:SECONDS.
 SET lastSpd   TO SHIP:AIRSPEED.
 SET accelNow  TO 0.
 SET accelSm   TO 0.
@@ -1255,8 +1320,24 @@ UNTIL switchNow {
     // ---- the Q corridor -----------------------------------------------------
     LOCAL scaleH IS atmScaleHeight().
     LOCAL qNow   IS MAX(0.0005, SHIP:Q).
+
+    // Outer loop: trim the target itself against sustained acceleration, so the
+    // corridor ends up where this airframe's drag and intakes actually balance
+    // rather than where a constant guessed they would.
+    IF AB_Q_ADAPT AND nowT - lastQTrimT >= AB_Q_ADAPT_DT {
+      SET lastQTrimT TO nowT.
+      IF ABS(LN(qNow / qTgt)) < AB_Q_ADAPT_TOL {
+        IF accelSm > AB_ACC_TARGET {
+          SET qTgt TO qTgt * (1 - AB_Q_ADAPT_STEP).   // room to spare: go thinner
+        } ELSE {
+          SET qTgt TO qTgt * (1 + AB_Q_ADAPT_STEP).   // starving: come back down
+        }
+        SET qTgt TO clampVal(qTgt, AB_Q_TGT_MIN, AB_Q_TGT_MAX).
+      }
+    }
+
     LOCAL vsHold IS 2 * scaleH * accelSm / MAX(50, SHIP:AIRSPEED).
-    LOCAL vsWant IS vsHold + scaleH * AB_Q_KP * LN(qNow / AB_Q_TARGET).
+    LOCAL vsWant IS vsHold + scaleH * AB_Q_KP * LN(qNow / qTgt).
     // Keep the command inside what the airframe can actually fly.  A vs command
     // the pitch clamp cannot deliver is not guidance, it is integral windup.
     LOCAL vsFlyable IS SHIP:AIRSPEED * SIN(AB_FPA_MAX).
@@ -1331,6 +1412,9 @@ UNTIL switchNow {
     IF SHIP:ALTITUDE > SW_ALT_HARD OR SHIP:AIRSPEED > SW_SPEED_HARD {
       SET switchNow TO TRUE.
       SET swReason TO "hard backstop (altitude/speed limit)".
+    } ELSE IF SHIP:Q < SW_Q_HARD AND SHIP:ALTITUDE > SW_ARM_ALT {
+      SET switchNow TO TRUE.
+      SET swReason TO "intakes starved - Q down to " + ROUND(SHIP:Q, 3) + " atm".
     }
   }
 
@@ -1340,7 +1424,7 @@ UNTIL switchNow {
   IF nowT - abReportT > 15 {
     PRINT "  alt " + ROUND(SHIP:ALTITUDE / 1000, 1) + " km | " + ROUND(SHIP:AIRSPEED) +
           " m/s | acc " + ROUND(accelSm, 2) + " | Q " + ROUND(SHIP:Q, 2) + "/" +
-          ROUND(AB_Q_TARGET, 2).
+          ROUND(qTgt, 2).
     PRINT "      vs " + ROUND(SHIP:VERTICALSPEED) + "/" + ROUND(vsCmd) +
           " | pitch " + ROUND(pitchCmd, 1) + " | thr " +
           ROUND(100 * SHIP:AVAILABLETHRUST / MAX(1, peakJetT)) + "% | dV " + ROUND(rocketDv()).
@@ -1399,7 +1483,11 @@ SET ccFpaHi TO CC_FPA_HI.
 IF ccFpaHi <= 0 {
   SET ccFpaHi TO clampVal(CC_FPA_TWR_A - CC_FPA_TWR_B * twrNow(), 5, 20).
 }
-SET swAlt TO SHIP:ALTITUDE.
+// The handover state, kept for the post-flight sizing advice: this is the point
+// the whole mission is priced from, and now it is measured rather than assumed.
+SET swAlt      TO SHIP:ALTITUDE.
+SET swSpeed    TO SHIP:AIRSPEED.
+SET twrAtSwitch TO twrNow().
 PRINT "  Initial climb command " + ROUND(ccFpaHi, 1) + " deg, flattening to " +
       ROUND(CC_FPA_FLAT, 1) + " deg by " + ROUND(CC_FLAT_ALT / 1000) + " km.".
 
@@ -1789,6 +1877,83 @@ IF NOT abortSuborbital {
   }
   PRINT "======================================================".
   PRINT "Autopilot complete. Ship handed back to pilot (SAS on).".
+}
+
+// ---------------------------------------------------------------------------
+//  7. POST-FLIGHT  --  what would this ship need, going by what it just did?
+// ---------------------------------------------------------------------------
+//  The pre-flight check answers this from a model.  By now the model is
+//  redundant: the ship has flown the mission and every assumption in it has a
+//  measured counterpart.  So the same sizing solvers are re-run with the real
+//  numbers substituted in - the jet phase's actual fuel fraction, the actual
+//  handover, the actual climb losses - and they price the mission the ship
+//  really flew rather than the one it was expected to.
+//
+//  This is the block to read when deciding what to change in the SPH.  The
+//  calibration constants are printed first so the next pre-flight check is
+//  about this airframe instead of a generic one.
+IF jetLfUsed > 0 {
+  PRINT "======================================================".
+  PRINT "POST-FLIGHT :: measured, not modelled".
+  PRINT "  Copy these into the tunables to calibrate the pre-flight check:".
+  PRINT "    SET PLAN_SWITCH_ALT  TO " + ROUND(swAlt / 100) * 100 + ".".
+  PRINT "    SET PLAN_SWITCH_SPD  TO " + ROUND(swSpeed / 10) * 10 + ".".
+  PRINT "    SET PLAN_JET_DV      TO " + ROUND(jetDvReal / 10) * 10 +
+        ".   // was " + ROUND(planJetDv).
+  PRINT "    SET PLAN_LOSS_FACTOR TO " + ROUND(lossFactor, 2) + ".".
+
+  // Re-price the mission the way the pre-flight check does, but with the jet
+  // phase's *measured* appetite and the *measured* climb losses.  Everything
+  // else the solvers need (pad propellant, tankage, payload) is unchanged -
+  // they are properties of the design, which is what we are advising on.
+  SET JET_FRAC   TO jetLfUsed / MAX(0.001, launchMass).
+  SET planSwSpd  TO swSpeed + ROT_BONUS.
+  SET dvRequired TO priceFromHandover(REQUESTED_APOAPSIS, swAlt, planSwSpd, lossFactor).
+  SET dvHandover TO dvAtHandover(0, 0).
+
+  PRINT "  For a " + ROUND(REQUESTED_APOAPSIS / 1000) + " km orbit with deorbit fuel," +
+        " this flight says you need".
+  PRINT "  " + ROUND(dvRequired) + " m/s at the handover and the design delivers " +
+        ROUND(dvHandover) + " m/s.".
+
+  IF dvHandover >= dvRequired {
+    PRINT "  => The airframe is sufficient (" + ROUND(dvHandover - dvRequired) +
+          " m/s spare). No changes required.".
+  } ELSE {
+    PRINT "  => SHORT BY " + ROUND(dvRequired - dvHandover) + " m/s. To fix it:".
+    SET fixLf TO solveLfTopUp().
+    IF fixLf > 0.05 {
+      PRINT "     * +" + ROUND(fixLf, 1) + " t of LIQUID FUEL ONLY (" +
+            ROUND(fixLf / LF_DENS) + " units). The jets ate into paired".
+      PRINT "       propellant; LF burns at jet Isp, so this is the cheap fix.".
+    }
+    SET fixProp TO solveProp(dvRequired, 0).
+    IF fixProp < 0 {
+      PRINT "     * Fuel alone cannot close it - the mass ratio tops out at " +
+            ROUND(dvAtHandover(20000, 0)) + " m/s.".
+      PRINT "       Cut dry mass or payload; more tanks will not help.".
+    } ELSE {
+      PRINT "     * or +" + ROUND(fixProp, 1) + " t of balanced LF/Ox plus ~" +
+            ROUND(fixProp * TANK_K, 1) + " t of tank to hold it.".
+    }
+    SET fixCut TO solveMassCut(dvRequired).
+    IF fixCut > 0 {
+      PRINT "     * or fly " + ROUND(fixCut, 1) + " t lighter (of " +
+            ROUND(payloadMass, 1) + " t of payload aboard).".
+    }
+    SET affordAp TO affordableApFrom(dvHandover, swAlt, planSwSpd, lossFactor).
+    IF affordAp > 0 AND affordAp < REQUESTED_APOAPSIS {
+      PRINT "     * or set REQUESTED_APOAPSIS TO " + ROUND(affordAp / 1000) * 1000 +
+            ". - that orbit this ship can already afford.".
+    }
+  }
+  IF lossFactor > 2 {
+    PRINT "  !! Climb losses of x" + ROUND(lossFactor, 2) + " are TWR-bound, not".
+    PRINT "     guidance-bound. Closed-cycle TWR was " + ROUND(twrAtSwitch, 2) +
+          " at the handover; another".
+    PRINT "     engine buys more than any profile change can.".
+  }
+  PRINT "======================================================".
 }
 
 SET CONFIG:IPU TO IPU_SAVED.
