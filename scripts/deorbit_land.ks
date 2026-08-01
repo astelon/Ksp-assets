@@ -40,20 +40,24 @@ SET TOUCHDOWN_ALT  TO 3.         // radar altitude considered "on the wheels" (m
 // ---------------------------------------------------------------------------
 //  Helpers
 // ---------------------------------------------------------------------------
+// NOTE: no identifier here may be a bare single letter - kOS refuses to compile
+// a variable that would hide a built-in function such as R(), V() or Q().
 FUNCTION resAmt {
   PARAMETER rname.
-  LOCAL t IS 0.
-  FOR r IN SHIP:RESOURCES { IF r:NAME = rname { SET t TO r:AMOUNT. } }
-  RETURN t.
+  LOCAL total IS 0.
+  FOR res IN SHIP:RESOURCES {
+    IF res:NAME = rname { SET total TO total + res:AMOUNT. }
+  }
+  RETURN total.
 }
 
 // Signed ground-track angle (deg) from the ship's sub-point to the KSC, measured
 // around the planet.  Uses longitude separation, corrected for orbit direction.
 FUNCTION trackAngleToKSC {
-  LOCAL d IS KSC_RWY:LNG - SHIP:GEOPOSITION:LNG.
-  UNTIL d <= 180 { SET d TO d - 360. }
-  UNTIL d > -180 { SET d TO d + 360. }
-  RETURN d.
+  LOCAL dLng IS KSC_RWY:LNG - SHIP:GEOPOSITION:LNG.
+  UNTIL dLng <= 180 { SET dLng TO dLng - 360. }
+  UNTIL dLng > -180 { SET dLng TO dLng + 360. }
+  RETURN dLng.
 }
 
 // ---------------------------------------------------------------------------
