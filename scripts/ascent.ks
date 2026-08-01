@@ -103,17 +103,23 @@ SET ATM_TOP TO SHIP:BODY:ATM:HEIGHT.
 // ---------------------------------------------------------------------------
 //  Ship measurement helpers
 // ---------------------------------------------------------------------------
+//  NOTE ON NAMING: kOS reserves its built-in function names, and refuses to
+//  compile a script that declares a variable which would hide one (the
+//  CLOBBERBUILTINS check).  R(), V() and Q() are built-ins, so no identifier
+//  in this script is a bare single letter.
 FUNCTION resAmt {                    // total amount of a resource across the ship
   PARAMETER rname.
-  LOCAL t IS 0.
-  FOR r IN SHIP:RESOURCES { IF r:NAME = rname { SET t TO t + r:AMOUNT. } }
-  RETURN t.
+  LOCAL total IS 0.
+  FOR res IN SHIP:RESOURCES {
+    IF res:NAME = rname { SET total TO total + res:AMOUNT. }
+  }
+  RETURN total.
 }
 
 FUNCTION resDensity {                // tonnes per unit (0.005 for LF and Ox)
   PARAMETER rname.
-  FOR r IN SHIP:RESOURCES {
-    IF r:NAME = rname AND r:DENSITY > 0 { RETURN r:DENSITY. }
+  FOR res IN SHIP:RESOURCES {
+    IF res:NAME = rname AND res:DENSITY > 0 { RETURN res:DENSITY. }
   }
   RETURN 0.005.
 }
@@ -126,12 +132,12 @@ FUNCTION rocketIsp {
   LIST ENGINES IN engs.
   LOCAL wsum IS 0.
   LOCAL isum IS 0.
-  FOR e IN engs {
-    IF (NOT e:MULTIMODE) OR (e:MODE = "ClosedCycle") {
-      LOCAL t IS e:MAXTHRUST.
-      IF t > 0 AND e:VACUUMISP > 0 {
-        SET wsum TO wsum + t.
-        SET isum TO isum + t * e:VACUUMISP.
+  FOR eng IN engs {
+    IF (NOT eng:MULTIMODE) OR (eng:MODE = "ClosedCycle") {
+      LOCAL thr IS eng:MAXTHRUST.
+      IF thr > 0 AND eng:VACUUMISP > 0 {
+        SET wsum TO wsum + thr.
+        SET isum TO isum + thr * eng:VACUUMISP.
       }
     }
   }
@@ -160,9 +166,9 @@ FUNCTION rocketDv {
 FUNCTION localG   { RETURN BODY_MU / ((BODY_R + SHIP:ALTITUDE) * (BODY_R + SHIP:ALTITUDE)). }
 FUNCTION weightKN { RETURN SHIP:MASS * localG(). }        // 1 t x 1 m/s^2 = 1 kN
 FUNCTION twrNow {
-  LOCAL w IS weightKN().
-  IF w <= 0 { RETURN 0. }
-  RETURN SHIP:AVAILABLETHRUST / w.
+  LOCAL wgt IS weightKN().
+  IF wgt <= 0 { RETURN 0. }
+  RETURN SHIP:AVAILABLETHRUST / wgt.
 }
 
 // ---------------------------------------------------------------------------
@@ -211,11 +217,11 @@ FUNCTION reserveDvFor {
 // pads it for gravity and steering losses.
 FUNCTION dvToRaiseApTo {
   PARAMETER apAlt.
-  LOCAL r IS BODY_R + SHIP:ALTITUDE.
-  LOCAL rt IS BODY_R + apAlt.
-  IF rt <= r OR SHIP:APOAPSIS >= apAlt { RETURN 0. }
-  LOCAL smaT IS (r + rt) / 2.
-  LOCAL vNeed IS SQRT(BODY_MU * (2 / r - 1 / smaT)).
+  LOCAL rHere IS BODY_R + SHIP:ALTITUDE.
+  LOCAL rTgt IS BODY_R + apAlt.
+  IF rTgt <= rHere OR SHIP:APOAPSIS >= apAlt { RETURN 0. }
+  LOCAL smaT IS (rHere + rTgt) / 2.
+  LOCAL vNeed IS SQRT(BODY_MU * (2 / rHere - 1 / smaT)).
   RETURN MAX(0, vNeed - SHIP:VELOCITY:ORBIT:MAG) * CLIMB_LOSS_FACTOR.
 }
 
@@ -233,8 +239,8 @@ FUNCTION shipEnergy {
 }
 
 FUNCTION clampVal {
-  PARAMETER x, lo, hi.
-  RETURN MAX(lo, MIN(hi, x)).
+  PARAMETER val, lo, hi.
+  RETURN MAX(lo, MIN(hi, val)).
 }
 
 // ---------------------------------------------------------------------------
@@ -244,11 +250,11 @@ FUNCTION setRapierMode {             // force every multimode engine into one mo
   PARAMETER wantClosed.              // TRUE = ClosedCycle, FALSE = AirBreathing
   LOCAL engs IS LIST().
   LIST ENGINES IN engs.
-  FOR e IN engs {
-    IF e:MULTIMODE {
-      SET e:AUTOSWITCH TO FALSE.     // we manage the switch ourselves
-      IF wantClosed AND e:MODE = "AirBreathing" { e:TOGGLEMODE(). }
-      IF (NOT wantClosed) AND e:MODE = "ClosedCycle" { e:TOGGLEMODE(). }
+  FOR eng IN engs {
+    IF eng:MULTIMODE {
+      SET eng:AUTOSWITCH TO FALSE.   // we manage the switch ourselves
+      IF wantClosed AND eng:MODE = "AirBreathing" { eng:TOGGLEMODE(). }
+      IF (NOT wantClosed) AND eng:MODE = "ClosedCycle" { eng:TOGGLEMODE(). }
     }
   }
 }
@@ -256,9 +262,9 @@ FUNCTION setRapierMode {             // force every multimode engine into one mo
 FUNCTION anyFlameout {
   LOCAL engs IS LIST().
   LIST ENGINES IN engs.
-  LOCAL out IS FALSE.
-  FOR e IN engs { IF e:IGNITION AND e:FLAMEOUT { SET out TO TRUE. } }
-  RETURN out.
+  LOCAL flamed IS FALSE.
+  FOR eng IN engs { IF eng:IGNITION AND eng:FLAMEOUT { SET flamed TO TRUE. } }
+  RETURN flamed.
 }
 
 FUNCTION budgetLine {                // one-line dV status, used throughout

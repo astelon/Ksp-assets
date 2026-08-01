@@ -54,19 +54,23 @@ SET BODY_ROT_RATE TO 360 / SHIP:BODY:ROTATIONPERIOD.   // deg/s, eastward
 // ---------------------------------------------------------------------------
 //  Helpers
 // ---------------------------------------------------------------------------
+// NOTE: no identifier here may be a bare single letter - kOS refuses to compile
+// a variable that would hide a built-in function such as R(), V() or Q().
 FUNCTION resAmt {
   PARAMETER rname.
-  LOCAL t IS 0.
-  FOR r IN SHIP:RESOURCES { IF r:NAME = rname { SET t TO r:AMOUNT. } }
-  RETURN t.
+  LOCAL total IS 0.
+  FOR res IN SHIP:RESOURCES {
+    IF res:NAME = rname { SET total TO total + res:AMOUNT. }
+  }
+  RETURN total.
 }
 
 FUNCTION normAng {                   // wrap an angle into (-180, 180]
-  PARAMETER a.
-  LOCAL d IS a.
-  UNTIL d <= 180 { SET d TO d - 360. }
-  UNTIL d > -180 { SET d TO d + 360. }
-  RETURN d.
+  PARAMETER angIn.
+  LOCAL ang IS angIn.
+  UNTIL ang <= 180 { SET ang TO ang - 360. }
+  UNTIL ang > -180 { SET ang TO ang + 360. }
+  RETURN ang.
 }
 
 // Signed ground-track angle (deg) from the sub-point we will be over at
@@ -75,9 +79,9 @@ FUNCTION normAng {                   // wrap an angle into (-180, 180]
 // KSC's longitude is advanced by the planet's own spin over the same interval to
 // keep the two comparable.  Positive means the KSC is still ahead of us.
 FUNCTION trackAngleAt {
-  PARAMETER t.
-  LOCAL dt  IS t - TIME:SECONDS.
-  LOCAL sub IS SHIP:BODY:GEOPOSITIONOF(POSITIONAT(SHIP, t)).
+  PARAMETER tUT.
+  LOCAL dt  IS tUT - TIME:SECONDS.
+  LOCAL sub IS SHIP:BODY:GEOPOSITIONOF(POSITIONAT(SHIP, tUT)).
   RETURN normAng(KSC_RWY:LNG + BODY_ROT_RATE * dt - sub:LNG).
 }
 
@@ -90,15 +94,15 @@ FUNCTION trackAngleToKSC { RETURN trackAngleAt(TIME:SECONDS). }
 FUNCTION deorbitTimeAfter {
   PARAMETER tFrom.
   LOCAL span IS SHIP:OBT:PERIOD * SCAN_ORBITS.
-  LOCAL a    IS tFrom.
-  LOCAL fa   IS normAng(trackAngleAt(a) - DEORBIT_LEAD).
-  LOCAL b    IS tFrom.
-  UNTIL b >= tFrom + span {
-    SET b TO MIN(b + SCAN_STEP, tFrom + span).
-    LOCAL fb IS normAng(trackAngleAt(b) - DEORBIT_LEAD).
+  LOCAL tA   IS tFrom.
+  LOCAL fa   IS normAng(trackAngleAt(tA) - DEORBIT_LEAD).
+  LOCAL tB   IS tFrom.
+  UNTIL tB >= tFrom + span {
+    SET tB TO MIN(tB + SCAN_STEP, tFrom + span).
+    LOCAL fb IS normAng(trackAngleAt(tB) - DEORBIT_LEAD).
     IF fa * fb <= 0 AND ABS(fa - fb) < 90 {
-      LOCAL lo IS a.  LOCAL hi IS b.  LOCAL flo IS fa.
-      FROM { LOCAL i IS 0. } UNTIL i >= 25 STEP { SET i TO i + 1. } DO {
+      LOCAL lo IS tA.  LOCAL hi IS tB.  LOCAL flo IS fa.
+      FROM { LOCAL iter IS 0. } UNTIL iter >= 25 STEP { SET iter TO iter + 1. } DO {
         LOCAL mid IS (lo + hi) / 2.
         LOCAL fm  IS normAng(trackAngleAt(mid) - DEORBIT_LEAD).
         IF flo * fm <= 0 { SET hi TO mid. }
@@ -106,7 +110,7 @@ FUNCTION deorbitTimeAfter {
       }
       RETURN (lo + hi) / 2.
     }
-    SET a TO b.  SET fa TO fb.
+    SET tA TO tB.  SET fa TO fb.
   }
   RETURN 0.
 }
@@ -114,12 +118,12 @@ FUNCTION deorbitTimeAfter {
 // Retrograde dV needed at universal time t to drop periapsis to DEORBIT_PE,
 // priced off the orbit we will actually be on at that moment.
 FUNCTION deorbitDvAt {
-  PARAMETER t.
-  LOCAL r  IS BODY_R + SHIP:BODY:ALTITUDEOF(POSITIONAT(SHIP, t)).
-  LOCAL rP IS BODY_R + DEORBIT_PE.
-  IF rP >= r { RETURN 0. }
-  LOCAL smaT IS (r + rP) / 2.
-  RETURN MAX(0, VELOCITYAT(SHIP, t):ORBIT:MAG - SQRT(BODY_MU * (2 / r - 1 / smaT))).
+  PARAMETER tUT.
+  LOCAL rAt IS BODY_R + SHIP:BODY:ALTITUDEOF(POSITIONAT(SHIP, tUT)).
+  LOCAL rP  IS BODY_R + DEORBIT_PE.
+  IF rP >= rAt { RETURN 0. }
+  LOCAL smaT IS (rAt + rP) / 2.
+  RETURN MAX(0, VELOCITYAT(SHIP, tUT):ORBIT:MAG - SQRT(BODY_MU * (2 / rAt - 1 / smaT))).
 }
 
 // Thrust-weighted vacuum Isp of the engines that will do the burn.
@@ -128,11 +132,11 @@ FUNCTION rocketIsp {
   LIST ENGINES IN engs.
   LOCAL wsum IS 0.
   LOCAL isum IS 0.
-  FOR e IN engs {
-    IF (NOT e:MULTIMODE) OR (e:MODE = "ClosedCycle") {
-      IF e:MAXTHRUST > 0 AND e:VACUUMISP > 0 {
-        SET wsum TO wsum + e:MAXTHRUST.
-        SET isum TO isum + e:MAXTHRUST * e:VACUUMISP.
+  FOR eng IN engs {
+    IF (NOT eng:MULTIMODE) OR (eng:MODE = "ClosedCycle") {
+      IF eng:MAXTHRUST > 0 AND eng:VACUUMISP > 0 {
+        SET wsum TO wsum + eng:MAXTHRUST.
+        SET isum TO isum + eng:MAXTHRUST * eng:VACUUMISP.
       }
     }
   }
@@ -143,10 +147,10 @@ FUNCTION rocketIsp {
 // How long dV takes at full throttle, from the rocket equation run backwards.
 FUNCTION burnTimeFor {
   PARAMETER dv.
-  LOCAL f IS SHIP:AVAILABLETHRUST.
-  IF dv <= 0 OR f <= 0 { RETURN 0. }
+  LOCAL thr IS SHIP:AVAILABLETHRUST.
+  IF dv <= 0 OR thr <= 0 { RETURN 0. }
   LOCAL ve IS rocketIsp() * G0.
-  RETURN SHIP:MASS * ve * (1 - CONSTANT:E ^ (-dv / ve)) / f.
+  RETURN SHIP:MASS * ve * (1 - CONSTANT:E ^ (-dv / ve)) / thr.
 }
 
 // Force every multimode engine into closed cycle: in vacuum the air-breathing
@@ -154,10 +158,10 @@ FUNCTION burnTimeFor {
 FUNCTION goClosedCycle {
   LOCAL engs IS LIST().
   LIST ENGINES IN engs.
-  FOR e IN engs {
-    IF e:MULTIMODE {
-      SET e:AUTOSWITCH TO FALSE.
-      IF e:MODE = "AirBreathing" { e:TOGGLEMODE(). }
+  FOR eng IN engs {
+    IF eng:MULTIMODE {
+      SET eng:AUTOSWITCH TO FALSE.
+      IF eng:MODE = "AirBreathing" { eng:TOGGLEMODE(). }
     }
   }
 }
