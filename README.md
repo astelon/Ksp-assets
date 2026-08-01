@@ -88,8 +88,11 @@ cp scripts/ascent.ks scripts/deorbit_land.ks  "<KSP>/Ships/Script/"
 2. Right-click the **kOS processor** → **Open Terminal**.
 3. Fly to orbit:
    ```
-   RUN ascent.
+   RUN ascent.             // 100 km, the default
+   RUN ascent(150000).     // or any apoapsis, in metres
    ```
+   The requested apoapsis has to clear the launch body's atmosphere — the
+   script checks it against the body it is actually on and tells you if not.
    It isolates the payload's fuel from its own, measures the ship (mass, both
    engine modes, TWR, ΔV) and runs a **pre-flight feasibility check** — if the
    ship can't afford the orbit it says by how much and what to add, accounting

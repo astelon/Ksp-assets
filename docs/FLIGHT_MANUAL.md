@@ -29,15 +29,23 @@ but Group 1 is a handy manual override.
 ### To orbit
 
 ```
-RUN ascent.
+RUN ascent.             // 100 km, the default
+RUN ascent(150000).     // or any apoapsis, in metres
 ```
 
+The apoapsis is optional and is given in **metres**. It must clear the
+atmosphere of the body being launched from: the script compares it against that
+body rather than a hardcoded 70 km, and if it falls short it says so, explains
+where the lowest real orbit is, and flies that instead. A value outside the
+body's sphere of influence is clamped the same way. (Passing `150` when you
+meant 150 km is caught explicitly.)
+
 Sequence: map the fuel network and isolate the payload → measure both engine
-modes and run the feasibility check → roll → rotate at 80 m/s →
-accelerate-first air-breathing climb
-→ switch to closed cycle when the jets actually run out of breath → rocket push
-to the requested apoapsis → coast (time-warped) → circularise → report. Hands off
-the whole way.
+modes and run the feasibility check → roll → rotate at 80 m/s → air-breathing
+climb along a self-tuning dynamic-pressure corridor → switch to closed cycle
+when the rocket becomes the cheaper way to buy speed → rocket push to the
+requested apoapsis → coast (time-warped) → circularise → report, including what
+to change on the ship. Hands off the whole way.
 
 ### The pre-flight feasibility check
 
@@ -99,26 +107,45 @@ has the performance to reach orbit at all. Four things it decides for itself:
   siphoned during the climb**. If a separator exposes no crossfeed toggle, the
   script falls back to disabling flow on the payload's tanks and tells you to
   re-enable them after you release the payload.
-* **The flight profile — accelerate first.** Both powered phases obey one rule:
-  climb only as steeply as the ship can climb *while still gaining speed*. The
-  air-breathing phase commands a vertical speed, raising it while acceleration
-  is healthy and lowering it the moment acceleration sags; the rocket phase
-  commands a flight-path angle biased the same way. A single controller turns
-  that command into pitch — feed-forward γ plus a slow, clamped trim that learns
-  this airframe's angle of attack — so the nose moves smoothly instead of
-  hunting. Time-to-apoapsis is deliberately *not* a control variable: it is
-  discontinuous exactly where the rocket phase starts.
-* **When the jets are done.** Air-breathing Isp is roughly ten times the
-  rocket's, so the switch is deliberately reluctant: flameout, thrust decayed
-  off its own measured peak, airspeed falling away from its peak, or no
-  acceleration left *after* the profile has already flattened out. One low
-  acceleration sample while the nose is up is not evidence, and switching early
-  throws away hundreds of m/s of nearly-free speed.
-* **What orbit it can actually afford.** It flies for `REQUESTED_APOAPSIS`
-  (100 km by default) but *measures* what the climb really costs — how much of
-  the bill each m/s of spent ΔV retires — and re-prices the orbit from that
-  instead of trusting an impulsive estimate. If the target is priced out it
-  settles for the best orbit it can afford and says so.
+* **The flight profile — ride the air, don't climb out of it.** The
+  air-breathing phase holds a **dynamic-pressure corridor**: Q is the air the
+  intakes are being fed, so holding Q is the same thing as staying where the
+  jets work. The command is derived rather than searched for — since
+  Q = ½ρv² and ρ ~ e^(−h/H), the vertical speed that holds Q is 2Ha/v, plus a
+  proportional term on the standing error — and H is measured off the body's own
+  pressure curve, so nothing is tuned to Kerbin. The target Q is itself trimmed
+  slowly against sustained acceleration, so the corridor ends up where *this*
+  airframe's drag and intakes balance. The climb is capped at 12° of flight
+  path, which is separate from the 25° pitch clamp: flight path is the physics,
+  pitch is mostly the angle of attack the trim needs to fly at all. A single
+  controller turns the command into pitch — feed-forward γ plus a slow, clamped
+  trim that learns the airframe's AoA — so the nose moves smoothly instead of
+  hunting. The rocket phase only ever *shallows*: spare thrust is never a reason
+  to point further from the horizon.
+* **When the jets are done — a price, not a threshold.** Every sample both modes
+  are costed in the same currency: tonnes of rocket-equivalent propellant per
+  m/s of speed bought. Drag is read out of the force balance the ship is already
+  flying (D = T − m(a + g·sin γ)), so the closed-cycle side of the comparison is
+  the same airframe at the same Mach and Q with only the engine swapped. Once
+  the LF-only reserve is gone, a tonne of liquid fuel also strands 11/9 t of
+  oxidiser, so the jet's price rises by 20/9 and the comparison knows it. The
+  jets keep running for exactly as long as they are the cheaper way to buy
+  speed. Three backstops bound it — 25 km, 1700 m/s, or Q below 0.04 atm — plus
+  an acceleration floor, because in level flight the jets stay cheaper per m/s
+  down to a crawl and the priced test alone would cruise forever.
+* **What orbit it can actually afford.** It flies for the requested apoapsis
+  (the `RUN ascent(...)` argument, 100 km by default) but *measures* what the
+  climb really costs — how much of the bill each m/s of spent ΔV retires — and
+  re-prices the orbit from that instead of trusting an impulsive estimate. If
+  the target is priced out it settles for the best orbit it can afford and says
+  so; if even a minimum orbit is gone it levels off and spends what is left
+  raising periapsis, which is what buys a survivable reentry.
+* **What to change on the ship.** After the flight every assumption in the
+  pre-flight model has a measured counterpart, so the same sizing solvers are
+  re-run with the real jet fuel fraction, handover state and climb losses. It
+  prints the calibration constants to paste back into the tunables, then what
+  the airframe actually needs: liquid fuel only, balanced LF/Ox plus tankage,
+  payload to shed, or the apoapsis it can already afford.
 
 **It never burns dry.** Two hard floors police every burn. Once an orbit is
 genuinely in reach the ascent stops at *circularise + deorbit + margin*, and
@@ -152,7 +179,7 @@ drifts away from retrograde during the coast. Warp ends `WARP_LEAD` seconds
 early to leave room for that. If no crossing is found (a wildly inclined or
 non-circular orbit), it says so and falls back to the old real-time wait.
 
-Both scripts expose their tunables at the top — trim `REQUESTED_APOAPSIS`,
+Both scripts expose their tunables at the top — trim
 `ROTATE_SPEED`, `DV_MARGIN`, `DV_GLIDE_RESERVE`, `DEORBIT_LEAD`, `WARP_LEAD`,
 `GLIDE_SPEED`, `FLARE_ALT`, etc. to taste. `DEORBIT_PE` appears in *both* scripts
 and should match: the ascent script reserves the ΔV that the deorbit script will

@@ -1,7 +1,9 @@
 // ============================================================================
 //  ascent.ks  --  Runway-to-orbit autopilot for a RAPIER spaceplane
 // ----------------------------------------------------------------------------
-//  Target : REQUESTED_APOAPSIS (default 100 km) circular over Kerbin, due east.
+//  Target : a circular orbit due east, at the apoapsis passed on the command
+//           line (metres) or 100 km if none is given.  It must clear the
+//           launch body's atmosphere; the script checks and says so if not.
 //  Engines: any CR-7 R.A.P.I.E.R. cluster (air-breathing on the runway, closed
 //           cycle for the final push to orbit).
 //
@@ -82,14 +84,29 @@
 //    5. Circularise : burn prograde at apoapsis, stop at the deorbit reserve.
 //    6. Report      : final orbit, dV left, deorbit funding check.
 //
-//  Run with:   RUN ascent.        (from the archive or the ship's Script volume)
+//  Run with:   RUN ascent.          - 100 km, the default
+//              RUN ascent(150000).  - or any apoapsis, in metres
+//              (from the archive or the ship's Script volume)
 //  Tunables are grouped at the top so you can trim the profile to your build.
 // ============================================================================
+
+// The orbit to aim for, in metres above the surface.  Optional - omit it and
+// the script flies the 100 km default.  It has to clear the atmosphere of
+// whatever body we are launching from, which is checked once the body has been
+// measured (see "Mission target" below); the parameter is only read here.
+//
+//    RUN ascent.              // 100 km
+//    RUN ascent(150000).      // 150 km
+//    RUNPATH("ascent", 85000).
+//
+// (Optional program parameters need kOS 1.0.1 or newer.  On anything older,
+// drop the "IS 100000" and always pass a value.)
+DECLARE PARAMETER requestedAp IS 100000.
 
 CLEARSCREEN.
 
 // --- Mission ----------------------------------------------------------------
-SET REQUESTED_APOAPSIS TO 100000.   // orbit we would *like* to reach (m)
+SET REQUESTED_APOAPSIS TO requestedAp.  // orbit we would *like* to reach (m)
 SET LAUNCH_HEADING     TO 90.       // due east - use Kerbin's rotation
 
 // --- dV budgeting -----------------------------------------------------------
@@ -285,6 +302,54 @@ SET ATM_TOP TO SHIP:BODY:ATM:HEIGHT.
 // margin on top.  Everything below this is a suborbital arc, not an orbit, and
 // needs no deorbit burn because it is already coming down.
 SET MIN_ORBIT_ALT TO ATM_TOP + PE_SAFETY.
+
+// The highest orbit that is still an orbit around *this* body.  Past the sphere
+// of influence the ship is on an escape trajectory and none of the vis-viva
+// pricing below means anything.
+SET MAX_ORBIT_ALT TO (SHIP:BODY:SOIRADIUS - BODY_R) * 0.8.
+
+// ---------------------------------------------------------------------------
+//  Mission target  --  validate the requested orbit against the body
+// ---------------------------------------------------------------------------
+//  An apoapsis inside the atmosphere is not an orbit, it is a ballistic arc
+//  that reenters on its own, and every dV figure in this script - circularise,
+//  deorbit, the reserve that funds it - is meaningless for one.  So the request
+//  is checked against the body actually being launched from rather than against
+//  a hardcoded 70 km, and raised to the lowest real orbit if it falls short.
+//
+//  It is clamped rather than refused because the ship is on the runway with
+//  nothing spent: flying the nearest sane mission and saying so loudly is more
+//  use than a kOS program that has no clean way to stop.
+SET apRequestBad TO FALSE.
+IF REQUESTED_APOAPSIS < MIN_ORBIT_ALT {
+  SET apRequestBad TO TRUE.
+  // Accurate for both cases this catches: an apoapsis inside the air, and one
+  // that clears the air but leaves no room for the periapsis safety margin the
+  // circularisation targets (which would make circPeTarget exceed apoapsis).
+  PRINT "!! Requested apoapsis " + ROUND(REQUESTED_APOAPSIS) +
+        " m is below the lowest orbit this can fly.".
+  IF ATM_TOP > 0 {
+    PRINT "   " + SHIP:BODY:NAME + "'s atmosphere ends at " + ROUND(ATM_TOP / 1000, 1) +
+          " km, and circularisation targets " + ROUND(PE_SAFETY / 1000, 1) +
+          " km above that,".
+    PRINT "   so the floor is " + ROUND(MIN_ORBIT_ALT / 1000, 1) +
+          " km. Below it there is nothing to circularise into.".
+  }
+  IF REQUESTED_APOAPSIS > 0 AND REQUESTED_APOAPSIS < 1000 {
+    PRINT "   That looks like kilometres - this parameter is in METRES, so".
+    PRINT "   " + ROUND(REQUESTED_APOAPSIS) + " km would be RUN ascent(" +
+          ROUND(REQUESTED_APOAPSIS * 1000) + ").".
+  }
+  SET REQUESTED_APOAPSIS TO MIN_ORBIT_ALT.
+  PRINT "   Flying for " + ROUND(REQUESTED_APOAPSIS / 1000, 1) + " km instead.".
+} ELSE IF REQUESTED_APOAPSIS > MAX_ORBIT_ALT {
+  SET apRequestBad TO TRUE.
+  PRINT "!! Requested apoapsis " + ROUND(REQUESTED_APOAPSIS / 1000) +
+        " km is outside " + SHIP:BODY:NAME + "'s sphere of influence.".
+  SET REQUESTED_APOAPSIS TO MAX_ORBIT_ALT.
+  PRINT "   Flying for " + ROUND(REQUESTED_APOAPSIS / 1000, 1) + " km instead.".
+}
+IF apRequestBad AND PREFLIGHT_HOLD > 0 { WAIT PREFLIGHT_HOLD. }
 
 // kOS runs a fixed number of instructions per physics tick; the default is too
 // slow for a control loop that also re-prices an orbit.  Restored on exit.
@@ -946,6 +1011,8 @@ FUNCTION budgetLine {               // one-line dV status, used throughout
 //  0. PRE-FLIGHT  --  measure the ship we are actually flying
 // ---------------------------------------------------------------------------
 PRINT "=== RAPIER SSTO :: ascent autopilot ===".
+PRINT "Target: " + ROUND(REQUESTED_APOAPSIS / 1000, 1) + " km circular over " +
+      SHIP:BODY:NAME + ", heading " + ROUND(LAUNCH_HEADING) + ".".
 SAS OFF.
 RCS OFF.
 LIGHTS ON.
