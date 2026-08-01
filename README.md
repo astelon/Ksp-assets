@@ -40,6 +40,7 @@ craft/Mk3_Titan_SSTO.craft   The spaceplane (drop into your KSP save)
 scripts/ascent.ks            Runway -> orbit autopilot, ΔV-budgeting (kOS)
 scripts/deorbit_land.ks      Deorbit -> reentry -> runway landing autopilot (kOS)
 tools/build_craft.py         Procedural generator that produced the .craft
+tools/check_kos.py           Static checker for the .ks scripts - run before flying
 docs/BUILD_GUIDE.md          Part-by-part manifest + manual rebuild instructions
 docs/FLIGHT_MANUAL.md        Action groups + how to fly it (auto or by hand)
 docs/DESIGN.md               Mass & ΔV budget, ascent profile, design rationale
