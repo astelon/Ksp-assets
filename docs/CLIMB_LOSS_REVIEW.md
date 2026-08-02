@@ -6,19 +6,23 @@ number below is from that flight's own console output.
 
 ## What the ship was
 
-The pre-flight check was right about the airframe and said so on the runway:
+The pre-flight check declared the airframe short on the runway:
 
 ```
 !! NOT ENOUGH dV - SHORT BY 275 m/s
    (needs 1766, has 1491 at handover)
 ```
 
-270.6 t launch mass, 72 t of it payload — a 27% payload fraction. 1491 m/s of
-paired propellant at the handover against a 1766 m/s bill. **The ship was short.
-That part of the log is correct and is not what this review is about.**
+**That verdict is wrong, and it is wrong for the same reason the flight failed.**
+See [The pre-flight check was wrong too](#the-pre-flight-check-was-wrong-too) at
+the end — `PLAN_LOSS_FACTOR` had been calibrated from a number the broken
+measurement produced.
 
-What follows is about the three ways the rocket phase then made a 275 m/s
-shortfall much worse than it was.
+270.6 t launch mass, 72 t of it payload — a 27% payload fraction, with 1491 m/s
+of paired propellant in the ship's own tanks at the handover.
+
+What follows is the four ways the rocket phase then threw away an orbit it could
+afford.
 
 ## Defect 1 — the loss factor was measured cumulatively and spent forward
 
@@ -142,17 +146,67 @@ ignition fault rather than an empty ship, and the next flight should show which.
 Total thrust loss only: one flamed-out RAPIER out of fourteen is not a reason to
 end a climb the other thirteen are still flying.
 
-## What the script still cannot fix
+## The pre-flight check was wrong too
 
-The pre-flight check was right. 72 t of payload on 270.6 t leaves the ship 275
-m/s short of a 100 km orbit with deorbit fuel, and the fixes above do not
-manufacture propellant — they stop the script from throwing away the orbit it
-*can* reach. Its own advice stands:
+The same ship, at the same 270.6 t, flown by the **PR #2 autopilot** — the
+147-line fixed-schedule original, no ΔV budgeting, no feasibility check, a flat
+12° air-breathing climb and a 25°→5° rocket taper — reached orbit:
 
-- fly **29.4 t lighter**, or
-- add **61.1 t of LF/Ox** plus ~11.4 t of tankage and 3 RAPIERs, or
-- lower `REQUESTED_APOAPSIS` to around **80 km**.
+```
+ORBIT ACHIEVED
+  Apoapsis : 104.07 km
+  Periapsis: 99.01 km
+  Inclination: 0.05 deg
+  Fuel remaining -- LiquidFuel: 8097 , Oxidizer: 9071 , Monoprop: 100
+```
 
-The cheap one first: the jets ate **107 units of paired LF**, which is rocket ΔV
-burnt as jet fuel. 121 units of LF-only reserve (+0.6 t) closes that leak on its
-own and lifts the handover by 19 m/s.
+Reconciling that against the pre-flight print of the pad state (1337 m/s of
+pairs in our tanks, a 4929-unit LF-only reserve, 5760 LF / 7040 Ox of cargo):
+
+| | |
+|---|---|
+| Burned | 11371 LF / 8698 Ox = **100.3 t** |
+| In orbit | **170.3 t** |
+| Jets took | 4254 LF — inside the LF-only reserve, 675 units spare |
+| Rocket burned | 79.1 t: 249.3 t → 170.3 t = **1141 m/s** for climb + circularisation |
+
+The model priced that same climb and circularisation at **1608 m/s** (climb 1540
++ circ 68). Solving `1141 = 880 × L + 68` for the impulsive 880 m/s climb gives
+a real loss factor of **×1.22**, against the `PLAN_LOSS_FACTOR` of 1.75 the check
+was using — and 1.75 came from the ×3.21 recorded in `ASCENT_REVIEW.md`, which
+was produced by the identical cumulative `spent / paid` calculation this review
+is about. **The broken measurement poisoned the pre-flight constant, and the
+pre-flight constant then condemned a ship that flies.**
+
+`PLAN_LOSS_FACTOR` is now **1.30** — the measured 1.22 plus a little back, for
+the reason below. On this airframe that reads *needs 1370, has 1491* — a GO with
+8.8% in hand, where 1.75 read *short by 275*.
+
+### The caveat, which is not small
+
+PR #2 has no payload isolation, and stock fuel flow is proportional across every
+connected tank. Of the 100.3 t it burned, **34.1 t came out of the cargo tanks**
+— about a third of the entire ascent was flown on the payload's propellant. The
+current script blocks that deliberately, so the isolated ship carries those 34 t
+all the way to orbit and will pay a little more in gravity loss for it. Hence
+1.30 rather than 1.22; the difference is an estimate, not a measurement, and the
+first flight that gets to the top under the fixed script will replace it with
+the `PLAN_LOSS_FACTOR` line the post-flight block now prints.
+
+The pre-flight advice states the choice outright rather than making it:
+
+```
+* PAYLOAD FUEL: the cargo tanks hold 5760 LF / 7040 Ox, locked out as cargo.
+  Counting them would put 3168 m/s at the handover instead of 1491.
+  SET ISOLATE_PAYLOAD TO FALSE. only if that fuel is propellant
+  and not deliverable cargo - the engines will drink it.
+```
+
+3168 against 1491 is why PR #2 sailed to 104 km with no budgeting at all. Whether
+that is a success or a theft is a question about the mission, not the ascent.
+
+### Still worth doing
+
+The jets ate **107 units of paired LF** — rocket ΔV burnt as jet fuel. 121 units
+of LF-only reserve (+0.6 t) closes that leak and lifts the handover by 19 m/s.
+It is the cheapest fix on the list and it is real whatever else is decided.

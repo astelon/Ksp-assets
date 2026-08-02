@@ -145,7 +145,18 @@ SET PLAN_JET_DV_K    TO 2.2.        // jet dV per m/s of handover speed at TWR
                                     // 0.5; a draggy, slow-accelerating airframe
                                     // spends far longer fighting drag, so the
                                     // multiplier falls as take-off TWR rises
-SET PLAN_LOSS_FACTOR TO 1.75.       // gravity/drag/steering losses, rocket climb
+SET PLAN_LOSS_FACTOR TO 1.30.       // gravity/drag/steering losses, rocket climb.
+                                    // Was 1.75, calibrated off a ×3.21 that the
+                                    // old cumulative loss measurement produced -
+                                    // the same artefact documented in
+                                    // docs/CLIMB_LOSS_REVIEW.md.  The only
+                                    // end-to-end evidence there is says ×1.22:
+                                    // the PR #2 autopilot flew this airframe to
+                                    // 104×99 km spending 1141 m/s from the
+                                    // handover against an 880 m/s impulsive
+                                    // climb and a 68 m/s circularisation.  1.30
+                                    // is that with a little back for the heavier
+                                    // mass profile a payload-isolated ship flies
 SET PLAN_TWR_MIN     TO 1.05.       // closed-cycle TWR wanted at the handover
 SET PLAN_JET_ISP     TO 3200.       // air-breathing Isp if it cannot be read (s)
 SET PLAN_GO_MARGIN   TO 0.08.       // dV in hand, as a fraction of the bill,
@@ -925,6 +936,32 @@ FUNCTION dvAtHandover {             // ... adding a balanced LF/Ox load
   RETURN dvHandoverSplit(addProp * LF_FRAC, addProp * OX_FRAC, addDry).
 }
 
+// Rocket dV at the handover if the payload's tanks were counted as ours.  This
+// is not an upgrade, so it does not go through dvHandoverSplit: the propellant
+// and the tank holding it are already aboard and already being lifted, and
+// nothing is being added to the ship.  Only the pool the engines are allowed to
+// drink from changes.
+//
+// It is worth printing because it is the single largest number in the whole
+// budget, and because it is the difference between two flights of this airframe
+// that read as contradictions.  The PR #2 autopilot had no payload isolation and
+// reached 104 x 99 km; roughly a third of everything it burned came out of the
+// cargo tanks.  Whether that is a success or a theft is a question about the
+// mission, not about the ascent, so the script states the number and leaves the
+// decision to ISOLATE_PAYLOAD.
+FUNCTION dvHandoverWithPayloadFuel {
+  IF PAY_TANKS:LENGTH = 0 { RETURN 0. }
+  LOCAL mH IS handoverMass(0, 0, 0).
+  LOCAL lfLeft IS lfMass0 + listResAmt(PAY_TANKS, "LiquidFuel") * LF_DENS -
+                  jetBurnWith(0, 0, 0).
+  LOCAL oxLeft IS oxMass0 + listResAmt(PAY_TANKS, "Oxidizer") * OX_DENS.
+  LOCAL lfUse IS MIN(lfLeft, oxLeft * LFO_LF_RATIO / LFO_OX_RATIO).
+  IF lfUse <= 0 { RETURN 0. }
+  LOCAL prop IS lfUse * (LFO_LF_RATIO + LFO_OX_RATIO) / LFO_LF_RATIO.
+  IF mH <= prop { RETURN 0. }
+  RETURN RKT_ISP * G0 * LN(mH / (mH - prop)).
+}
+
 // How much liquid fuel is left over once the oxidiser is fully paired off -
 // i.e. the LF-only reserve the jets are meant to run on.  Negative means the
 // air-breathing phase is eating fuel the rocket phase was counting on, which
@@ -1354,6 +1391,24 @@ IF dvHandover >= dvRequired {
           ROUND(payloadMass, 1) + " t aboard) and the fuel you have is enough.".
   } ELSE IF payloadMass > 0 {
     PRINT "   * PAYLOAD: even flying empty would not close the gap.".
+  }
+
+  // --- or stop treating the payload's propellant as cargo --------------------
+  //  Almost always the biggest single number on this list, because the payload
+  //  tanks on a tanker are most of the propellant aboard.  It is offered last
+  //  and never taken automatically: the script cannot know whether that fuel is
+  //  meant to arrive in orbit or is simply fuel.
+  IF PAY_TANKS:LENGTH > 0 AND ISOLATE_PAYLOAD {
+    LOCAL dvUnlocked IS dvHandoverWithPayloadFuel().
+    IF dvUnlocked > dvHandover + 1 {
+      PRINT "   * PAYLOAD FUEL: the cargo tanks hold " +
+            ROUND(listResAmt(PAY_TANKS, "LiquidFuel")) + " LF / " +
+            ROUND(listResAmt(PAY_TANKS, "Oxidizer")) + " Ox, locked out as cargo.".
+      PRINT "     Counting them would put " + ROUND(dvUnlocked) +
+            " m/s at the handover instead of " + ROUND(dvHandover) + ".".
+      PRINT "     SET ISOLATE_PAYLOAD TO FALSE. only if that fuel is propellant".
+      PRINT "     and not deliverable cargo - the engines will drink it.".
+    }
   }
 
   // --- or accept a lower orbit ----------------------------------------------
