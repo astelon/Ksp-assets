@@ -107,6 +107,9 @@ def declarations(body):
                 yield lineno, m.group(1), kind, hard
         for m in PARAM_RE.finditer(line):
             for param in m.group(1).split(","):
+                # Optional parameters carry a default: `PARAMETER ap IS 100000.`
+                # Only the name before IS is the declaration.
+                param = re.split(r"\s+IS\s+", param.strip(), maxsplit=1, flags=re.I)[0]
                 param = param.strip()
                 if param:
                     yield lineno, param, "parameter", True
