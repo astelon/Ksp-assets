@@ -84,10 +84,14 @@ ship has enormous margin for lighter cargo, higher orbits, or rendezvous.
   space centre.
 * **Reentry**: high angle-of-attack (~40°) presents the belly and the Big-S
   wings as a big draggy brake, bleeding orbital energy without overheating,
-  while yawing the nose toward the runway.
+  while yawing the nose toward the runway. The alpha is held on the *airstream*
+  and tapered as the ship slows — held flat at 40° the same wings balloon it
+  back out and leave it stalled at the top of the atmosphere.
 * **Glide**: a spaceplane with this wing area has a wide glide footprint, so the
-  guidance script actively homes on the runway bearing and manages energy
-  (airbrakes/S-turns if high) — this absorbs deorbit-timing error.
+  guidance script homes on a final approach fix on the extended centreline and
+  manages energy (airbrakes, S-turns, or a spiral overhead if high) — this
+  absorbs deorbit-timing error. Speed is flown on the nose, the flight path on
+  drag, and the commanded AoA is clamped well short of the stall throughout.
 * **Landing**: capture runway heading 090, ~5° glideslope, flare at ~28 m
   radar altitude, gear down, touchdown, wheel-braking to a stop on centreline.
 
