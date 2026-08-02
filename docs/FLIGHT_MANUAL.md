@@ -165,9 +165,9 @@ RUN deorbit_land.
 
 Sequence: orient retrograde → predict the deorbit point (lead angle before the
 KSC) and plant a maneuver node there → time-warp to the burn → burn periapsis
-down to ~32 km → high-AoA reentry → energy-managed glide homing on the runway →
-capture heading 090 → glideslope → flare → gear down → touchdown → brake to a
-stop.
+down to ~32 km → high-AoA reentry → energy-managed glide homing on the final
+approach fix → capture heading 090 → glideslope → flare → gear down → touchdown
+→ brake to a stop.
 
 The deorbit point is *solved*, not waited out: the script scans the next two
 orbits with `POSITIONAT`, correcting for Kerbin's own rotation, bisects the
@@ -178,6 +178,43 @@ re-settles on the node burn vector after dropping out, since inertial attitude
 drifts away from retrograde during the coast. Warp ends `WARP_LEAD` seconds
 early to leave room for that. If no crossing is found (a wildly inclined or
 non-circular orbit), it says so and falls back to the old real-time wait.
+
+#### How the atmospheric part is flown
+
+Everything below the interface is commanded **relative to the airstream**, not
+to the horizon. `aeroSteer(hdg, aoa, bank)` puts the nose `aoa` degrees above
+the surface velocity vector and re-derives the pitch every physics tick, so the
+angle of attack is what is actually held however steeply the ship is descending.
+An absolute pitch command is what stalls a spaceplane: "3° nose down" while
+falling at −25° is +22° of AoA, well past the wing. The AoA clamp
+(`GLIDE_AOA_MAX`, 14°) is the stall guard and no phase relaxes it.
+
+* **Entry** holds `REENTRY_AOA` while there is orbital energy to throw away and
+  tapers it toward the glide angle between `ENTRY_AOA_HI` and `ENTRY_AOA_LO`
+  airspeed. Holding 40° all the way down balloons the ship back out, leaves it
+  at the top of the atmosphere with no speed, and drops it. The nose is yawed
+  toward the KSC only as far as `ENTRY_YAW_MAX`: a hypersonic ship told to point
+  at a bearing well off its own track has no wing left to fly on. Entry ends at
+  `ENTRY_END_ALT` **or** `ENTRY_END_SPD`, whichever comes first.
+* **Glide** aims at a *final approach fix* `FINAL_DIST` short of the threshold on
+  the extended centreline, not at the threshold itself — a bearing-only homing
+  law arrives overhead still high and pointing anywhere. Speed is flown on the
+  nose (AoA), the flight path on drag and track length: airbrakes and ±
+  `STURN_OFFSET` S-turns when above the `PLAN_LD` profile, and inside
+  `HOLD_RADIUS` excess height is spiralled off over the field rather than chased
+  round a bearing that swings through 180°. Below profile with
+  `USE_JETS_SHORT` set, the RAPIERs go back to **air-breathing** and push.
+* **Final** flies nose-for-speed, boards-for-glideslope — the way a glider is
+  flown — with a localiser term (`LOC_GAIN`, `LOC_MAX`) closing on the
+  centreline, wings level below 120 m, then the flare at `FLARE_ALT`.
+
+Ranges are measured as **ground range**, never `geo:DISTANCE`: the latter is
+3-D and dominated by altitude, so at 30 km overhead the runway reads "30 km
+away" and any range test using it fires at the wrong moment.
+
+The script raises `CONFIG:IPU` to 500 so the control loop stays crisp, and zeroes
+the pilot throttle before handing back — after an ascent the manual throttle is
+usually still at 100%, and the jets are back on air by then.
 
 Both scripts expose their tunables at the top — trim
 `ROTATE_SPEED`, `DV_MARGIN`, `DV_GLIDE_RESERVE`, `DEORBIT_LEAD`, `WARP_LEAD`,
@@ -201,6 +238,23 @@ The ascent tunables worth knowing if a flight goes wrong:
 | `PLAN_TWR_MIN` | 1.05 | Closed-cycle TWR the sizing advice tries to hold at handover. |
 | `PREFLIGHT_HOLD` | 12 s | Pause on a failed check so you can read it. 0 to skip. |
 | `ABORT_IF_INFEASIBLE` | `FALSE` | `TRUE` cuts the burn the moment orbit is priced out of reach, keeping the most fuel for a return. |
+
+The landing tunables worth knowing if a reentry goes wrong:
+
+| Tunable | Default | What it does |
+|---|---|---|
+| `REENTRY_AOA` | 40° | Alpha held while hypersonic. Lower it if the ship balloons back out of the atmosphere. |
+| `ENTRY_AOA_HI` / `ENTRY_AOA_LO` | 2000 / 500 m/s | Airspeeds the entry AoA is tapered between. Raise `ENTRY_AOA_LO` if the ship is still fast when the glide starts. |
+| `ENTRY_END_ALT` / `ENTRY_END_SPD` | 25 km / 700 m/s | Handover to the glide, whichever comes first. |
+| `GLIDE_AOA_MAX` | 14° | Hard stall guard. The single most important number here — no phase is allowed past it. |
+| `GLIDE_SPEED` / `APPR_SPEED` | 160 / 110 m/s | Target airspeeds for the glide and for final. |
+| `AOA_PER_MS` | 0.05°/m/s | Speed-loop gain. Raise for a tighter speed hold, lower if the nose hunts. |
+| `PLAN_LD` | 4.5 | Glide ratio the energy plan assumes. Too optimistic and the ship lands short; too pessimistic and it S-turns the whole way home. |
+| `HIGH_MARGIN` / `LOW_MARGIN` | 1500 / 400 m | Deadband either side of the profile before energy is dumped or the jets are lit. |
+| `HOLD_RADIUS` | 8 km | Inside this, excess height is spiralled off over the field instead of flown off in S-turns. |
+| `FINAL_DIST` | 9 km | How far short of the threshold the final approach fix sits. |
+| `BANK_MAX` / `BANK_PER_DEG` | 30° / 1.5 | Turn authority and how hard heading error is banked on. |
+| `USE_JETS_SHORT` | `TRUE` | `FALSE` keeps the return a pure glide and accepts landing short. |
 
 ### Before you edit a script
 
