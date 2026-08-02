@@ -232,6 +232,10 @@ The ascent tunables worth knowing if a flight goes wrong:
 | `CC_FPA_HI` / `CC_FPA_LO` | 15° / 0° | Rocket-phase flight-path schedule, tapering as apoapsis approaches target. |
 | `CC_ACC_LOW` | 1.5 m/s² | Below this the rocket phase shallows out rather than fighting gravity. |
 | `DV_GLIDE_RESERVE` | 120 m/s | The floor the ascent will never burn through. |
+| `EFF_WINDOW_DV` | 120 m/s | Rocket ΔV per climb-efficiency window. The measured loss factor describes the last window only, not the burn so far — see `docs/CLIMB_LOSS_REVIEW.md`. Shorten it for a twitchier reading, lengthen it for a steadier one. |
+| `EFF_VERDICT_P` | 0.005 | Ambient pressure, as a fraction of sea level, below which the rocket phase is allowed to declare no orbit reachable. ≈33 km on Kerbin. Raise it only if you want that call made earlier and on worse evidence. |
+| `EFF_MIN_WINDOWS` | 2 | Windows of evidence needed before that call, and the number of consecutive dead windows that override the pressure gate. |
+| `CC_DEAD_CONFIRM` | 4 | Consecutive no-thrust samples (0.5 s apart) before the rocket phase decides the engine has stopped and ends the climb. |
 | `PLAN_SWITCH_ALT` / `PLAN_SWITCH_SPD` | 20 km / 1450 m/s | Handover state the pre-flight check assumes. Trim to what your ship actually achieves — the script prints it at the real switch. |
 | `PLAN_JET_DV` | 3000 m/s | Jet-phase ΔV equivalent, incl. drag. Sets how much LF the check expects the jets to burn. |
 | `PLAN_LOSS_FACTOR` | 1.50 | Gravity/drag/steering losses assumed on the rocket climb, pre-flight only. |
