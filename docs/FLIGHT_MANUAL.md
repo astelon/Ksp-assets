@@ -189,24 +189,56 @@ An absolute pitch command is what stalls a spaceplane: "3° nose down" while
 falling at −25° is +22° of AoA, well past the wing. The AoA clamp
 (`GLIDE_AOA_MAX`, 14°) is the stall guard and no phase relaxes it.
 
+That convention is necessary but not sufficient, because a guidance law can still
+ask for an attitude the ship has no *speed* to fly to. Two more rules sit over
+the top of it, and `docs/REENTRY_REVIEW.md` is the flight that proves why:
+
+* **The envelope.** Every phase hands its heading and AoA demand to `setNav()`,
+  which folds the heading into the airstream on a speed schedule — 25° of lean
+  while hypersonic, opening to 60° once subsonic — limits bank on the same
+  schedule, and takes bank to **zero** at the stall. Bounding the command costs
+  nothing: the demand is re-referenced to the current airstream every pass, so
+  the ship still comes round to any heading asked for, it just flies the turn
+  instead of snapping the nose to the answer.
+* **Recovery outranks navigation.** With less than `STALL_Q` of dynamic pressure
+  under the wing, or with the nose more than `DEPART_AOA` off the airstream for
+  three seconds, the ship is not flying and no amount of navigation fixes that:
+  `stallRecover()` unloads the wing, levels the wings, stops asking for a turn,
+  lights the jets, puts RCS back on (at 40 m/s the control surfaces have nothing
+  to bite) and dives until the wing is back.
+
 * **Entry** holds `REENTRY_AOA` while there is orbital energy to throw away and
   tapers it toward the glide angle between `ENTRY_AOA_HI` and `ENTRY_AOA_LO`
   airspeed. Holding 40° all the way down balloons the ship back out, leaves it
-  at the top of the atmosphere with no speed, and drops it. The nose is yawed
-  toward the KSC only as far as `ENTRY_YAW_MAX`: a hypersonic ship told to point
-  at a bearing well off its own track has no wing left to fly on. Entry ends at
-  `ENTRY_END_ALT` **or** `ENTRY_END_SPD`, whichever comes first.
+  at the top of the atmosphere with no speed, and drops it. The nose leans toward
+  the KSC only as far as the yaw schedule allows. Entry also owns the **range**
+  problem, because that is where the energy to solve it is: it prices
+  `rangeCapability()` — energy height × the L/D it will average shedding it,
+  `ENTRY_LD` while hypersonic — against the range still to fly, and holds more
+  alpha (alpha is drag) or S-turns when long, gives alpha up to stretch when
+  short. Inside `ENTRY_HOLD_RNG` it stops chasing a bearing that swings through
+  180° as the field passes underneath. Entry ends at `ENTRY_END_SPD`;
+  `ENTRY_FLOOR` is a backstop, not an alternative — handing a Mach 3 ship to a
+  glide law is what the old "whichever comes first" rule did, and it cost a ship.
 * **Glide** aims at a *final approach fix* `FINAL_DIST` short of the threshold on
   the extended centreline, not at the threshold itself — a bearing-only homing
   law arrives overhead still high and pointing anywhere. Speed is flown on the
   nose (AoA), the flight path on drag and track length: airbrakes and ±
-  `STURN_OFFSET` S-turns when above the `PLAN_LD` profile, and inside
-  `HOLD_RADIUS` excess height is spiralled off over the field rather than chased
-  round a bearing that swings through 180°. Below profile with
-  `USE_JETS_SHORT` set, the RAPIERs go back to **air-breathing** and push.
+  `STURN_OFFSET` S-turns when above the `PLAN_LD` profile *and* with `MANEUVER_Q`
+  of air under the wing, and inside `HOLD_RADIUS` excess height is spiralled off over
+  the field. Short of profile **or** slow, with `USE_JETS_SHORT` set, the RAPIERs
+  go back to **air-breathing** and push — armed on speed as well as on the
+  profile, so the thrust arrives while it is still worth something.
 * **Final** flies nose-for-speed, boards-for-glideslope — the way a glider is
   flown — with a localiser term (`LOC_GAIN`, `LOC_MAX`) closing on the
   centreline, wings level below 120 m, then the flare at `FLARE_ALT`.
+* **Divert.** The glide's `GLIDE_FLOOR` is not a runway capture. Out of height
+  more than `DIVERT_RANGE` from the field, the script says so and flies a
+  wings-level landing straight ahead, because banking a low, slow ship toward a
+  runway it cannot reach arrives inverted rather than merely somewhere else. The
+  closing report reads `SHIP:STATUS`: it prints `STOPPED ON THE RUNWAY` only when
+  that is what happened, and `DITCHED` or `DOWN AND STOPPED n km from the runway`
+  when it is not.
 
 Ranges are measured as **ground range**, never `geo:DISTANCE`: the latter is
 3-D and dominated by altitude, so at 30 km overhead the runway reads "30 km
@@ -250,17 +282,26 @@ The landing tunables worth knowing if a reentry goes wrong:
 
 | Tunable | Default | What it does |
 |---|---|---|
+| `DEORBIT_LEAD` | 149° | Ground-track angle before the KSC at which the burn is made. **The** number to trim if the ship arrives with energy to spare (raise it) or on the jets (lower it) — see `docs/REENTRY_REVIEW.md` for how it was measured. |
 | `REENTRY_AOA` | 40° | Alpha held while hypersonic. Lower it if the ship balloons back out of the atmosphere. |
 | `ENTRY_AOA_HI` / `ENTRY_AOA_LO` | 2000 / 500 m/s | Airspeeds the entry AoA is tapered between. Raise `ENTRY_AOA_LO` if the ship is still fast when the glide starts. |
-| `ENTRY_END_ALT` / `ENTRY_END_SPD` | 25 km / 700 m/s | Handover to the glide, whichever comes first. |
-| `GLIDE_AOA_MAX` | 14° | Hard stall guard. The single most important number here — no phase is allowed past it. |
+| `ENTRY_END_SPD` / `ENTRY_FLOOR` | 650 m/s / 15 km | Handover to the glide. The **speed** is the handover; the altitude is only a backstop. Do not turn this back into "whichever comes first". |
+| `ENTRY_LD` | 3.0 | Ground range flown per metre of energy height while hypersonic — measured, not the glide ratio. Sets how long the entry thinks its range is. |
+| `ENERGY_LONG` / `ENERGY_SHORT` | 1.08 / 0.95 | Range-capability ratios at which the entry starts dumping energy or stretching. The ratio is printed every 5 s as `energy`. |
+| `GLIDE_AOA_MAX` / `FAST_AOA_MAX` | 14° / 8° | Hard stall guard, and the tighter ceiling above `FAST_SPD` where 14° is not a stall risk but a lift spike. No phase is allowed past either. |
+| `STALL_Q` / `MANEUVER_Q` / `RECOVER_Q` | 0.025 / 0.045 / 0.050 atm | Dynamic pressure at which the wing is considered gone, at which full bank and energy-dumping are allowed, and which a recovery flies back to. Pressure, not airspeed: 76 m/s at 9 km and 76 m/s over the runway are not the same flight state, and any airspeed threshold that catches the first is above the 110 m/s this ship flies its approach at. |
+| `DEPART_AOA` | 30° | Actual nose-to-airstream angle in the glide that counts as departed, held for 3 s. |
+| `JET_ARM_ALT` | 12 km | Ceiling for a jet save. Below it the jets light on low pressure under the wing *or* on being below profile. |
+| `YAW_SPD_HI` / `YAW_SPD_LO` / `YAW_SUB_MAX` | 1200 / 250 m/s / 60° | The heading-authority schedule: pinned to `ENTRY_YAW_MAX` above the first, opened to `YAW_SUB_MAX` below the second. |
 | `GLIDE_SPEED` / `APPR_SPEED` | 160 / 110 m/s | Target airspeeds for the glide and for final. |
 | `AOA_PER_MS` | 0.05°/m/s | Speed-loop gain. Raise for a tighter speed hold, lower if the nose hunts. |
 | `PLAN_LD` | 4.5 | Glide ratio the energy plan assumes. Too optimistic and the ship lands short; too pessimistic and it S-turns the whole way home. |
 | `HIGH_MARGIN` / `LOW_MARGIN` | 1500 / 400 m | Deadband either side of the profile before energy is dumped or the jets are lit. |
 | `HOLD_RADIUS` | 8 km | Inside this, excess height is spiralled off over the field instead of flown off in S-turns. |
 | `FINAL_DIST` | 9 km | How far short of the threshold the final approach fix sits. |
-| `BANK_MAX` / `BANK_PER_DEG` | 30° / 1.5 | Turn authority and how hard heading error is banked on. |
+| `BANK_MAX` / `BANK_PER_DEG` | 30° / 1.5 | Turn authority and how hard heading error is banked on. Both are still subject to the speed schedule. |
+| `GLIDE_FLOOR` / `DIVERT_RANGE` | 600 m / 12 km | AGL at which the glide must hand over, and how far from the runway that has to be before it is flown as a divert rather than an approach. |
+| `PITCH_MIN` | −85° | Absolute nose-down backstop. It must stay clear of a recovery dive along a near-vertical flight path — at −60 it silently ate the AoA guard and held the ship in the stall. |
 | `USE_JETS_SHORT` | `TRUE` | `FALSE` keeps the return a pure glide and accepts landing short. |
 
 ### Before you edit a script
