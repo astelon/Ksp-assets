@@ -145,18 +145,19 @@ SET PLAN_JET_DV_K    TO 2.2.        // jet dV per m/s of handover speed at TWR
                                     // 0.5; a draggy, slow-accelerating airframe
                                     // spends far longer fighting drag, so the
                                     // multiplier falls as take-off TWR rises
-SET PLAN_LOSS_FACTOR TO 1.30.       // gravity/drag/steering losses, rocket climb.
-                                    // Was 1.75, calibrated off a ×3.21 that the
-                                    // old cumulative loss measurement produced -
-                                    // the same artefact documented in
-                                    // docs/CLIMB_LOSS_REVIEW.md.  The only
-                                    // end-to-end evidence there is says ×1.22:
-                                    // the PR #2 autopilot flew this airframe to
-                                    // 104×99 km spending 1141 m/s from the
-                                    // handover against an 880 m/s impulsive
-                                    // climb and a 68 m/s circularisation.  1.30
-                                    // is that with a little back for the heavier
-                                    // mass profile a payload-isolated ship flies
+SET PLAN_LOSS_FACTOR TO 1.65.       // gravity/drag/steering losses, rocket climb.
+                                    // This prices the climb *from the handover*,
+                                    // so it has to include the opening, which is
+                                    // where nearly all of it is spent: the
+                                    // reference flight burned 330 of its 1499 m/s
+                                    // in the first 31 s at 12% efficiency and
+                                    // flew the remaining 1115 at x1.31.  End to
+                                    // end that is x1.66, and it is the end-to-end
+                                    // number this constant wants.  Do not set it
+                                    // from the in-flight window figure - that one
+                                    // describes the cheap end of the climb and is
+                                    // a different question.  See
+                                    // docs/CLIMB_LOSS_REVIEW.md.
 SET PLAN_TWR_MIN     TO 1.05.       // closed-cycle TWR wanted at the handover
 SET PLAN_JET_ISP     TO 3200.       // air-breathing Isp if it cannot be read (s)
 SET PLAN_GO_MARGIN   TO 0.08.       // dV in hand, as a fraction of the bill,
@@ -294,6 +295,19 @@ SET CC_TAP_MIN     TO 25.           // keep at least this long to the apex (s)
 SET CC_TAP_GAIN    TO 0.35.         // deg of extra climb per second short of it
 SET CC_TAP_MAX_ADD TO 12.           // ... clamped (deg)
 SET CC_POLICE_DT   TO 0.5.          // dV re-pricing interval (s)
+// --- angle of attack in the rocket phase ------------------------------------
+//  The trim loop will spend whatever angle it takes to hold the commanded
+//  flight path, and just after the handover that is all of it.  On the
+//  reference flight the trim sat on its 14 deg clamp and the airframe met the
+//  flow at 16.4 deg while still in 0.2 atm of dynamic pressure: 2335 kN of
+//  drag, 9.5 of the 10.2 m/s^2 the engines were making, 330 m/s of rocket fuel
+//  spent to buy 40 m/s of orbital energy.  Body drag on a Mk3 stack grows with
+//  the sine of the angle it presents, so the angle has to be rationed while the
+//  air can still charge for it.  Setting CC_AOA_HIQ to AOA_TRIM_MAX restores
+//  the old behaviour.
+SET CC_AOA_HIQ     TO 6.            // AoA allowed while the air still bites (deg)
+SET CC_AOA_Q_HI    TO 0.10.         // ... at and above this dynamic pressure (atm)
+SET CC_AOA_Q_LO    TO 0.02.         // ... opening to AOA_TRIM_MAX by this one
 SET CC_DEAD_CONFIRM TO 4.           // consecutive no-thrust samples before the
                                     // rocket phase calls the engine dead
 SET FEAS_ARM_DV    TO 350.          // rocket dV spent before the *whole-climb*
@@ -1037,6 +1051,7 @@ FUNCTION twrAtHandover {
 //  has no thrust for) leaves the trim saturated and poisons the next phase.
 // ---------------------------------------------------------------------------
 SET aoaTrim TO 0.
+SET aoaCap  TO AOA_TRIM_MAX.        // rationed on Q once the rocket phase starts
 
 FUNCTION speedNow {
   IF SHIP:ALTITUDE > ATM_TOP { RETURN MAX(30, SHIP:VELOCITY:ORBIT:MAG). }
@@ -1052,6 +1067,17 @@ FUNCTION fpaNow {
   RETURN ARCSIN(clampVal(SHIP:VERTICALSPEED / speedNow(), -0.95, 0.95)).
 }
 
+// How much angle of attack the flow may be charged for right now.  In the jet
+// phase this is the full trim authority and never binds - an air-breathing climb
+// holds its corridor at a few degrees.  In the rocket phase it is scheduled on
+// dynamic pressure, because that is what turns angle into drag.
+FUNCTION aoaLimitNow {
+  IF SHIP:Q >= CC_AOA_Q_HI { RETURN CC_AOA_HIQ. }
+  IF SHIP:Q <= CC_AOA_Q_LO { RETURN AOA_TRIM_MAX. }
+  RETURN CC_AOA_HIQ + (AOA_TRIM_MAX - CC_AOA_HIQ) *
+         (CC_AOA_Q_HI - SHIP:Q) / (CC_AOA_Q_HI - CC_AOA_Q_LO).
+}
+
 FUNCTION steerFpa {
   PARAMETER fpaWanted, pitchLo, pitchHi, dtStep.
   LOCAL err IS fpaWanted - fpaNow().
@@ -1061,7 +1087,13 @@ FUNCTION steerFpa {
      (raw >= pitchHi AND err < 0) {
     SET aoaTrim TO clampVal(aoaTrim + AOA_KI * err * dtStep, -AOA_TRIM_MAX, AOA_TRIM_MAX).
   }
-  RETURN clampVal(fpaWanted + aoaTrim, pitchLo, pitchHi).
+  // Limit the angle the airframe actually presents to the flow, not the trim.
+  // They are not the same number: while the trim is winding up the flight path
+  // lags the command, and the real angle of attack is the trim *plus* that lag.
+  // The reference flight sat on a 14 deg trim clamp and flew at 16.4 deg.
+  LOCAL cmd IS clampVal(fpaWanted + aoaTrim,
+                        fpaNow() - aoaCap, fpaNow() + aoaCap).
+  RETURN clampVal(cmd, pitchLo, pitchHi).
 }
 
 // ---------------------------------------------------------------------------
@@ -1691,6 +1723,7 @@ PRINT "  Initial climb command " + ROUND(ccFpaHi, 1) + " deg, flattening to " +
       ROUND(CC_FPA_FLAT, 1) + " deg by " + ROUND(CC_FLAT_ALT / 1000) + " km.".
 
 SET aoaTrim   TO 0.                 // fresh trim: different regime, different AoA
+SET aoaCap    TO aoaLimitNow().
 SET fpaBias   TO 0.
 SET emergency TO FALSE.             // orbit priced out: fly for periapsis instead
 SET lastLoopT TO TIME:SECONDS.
@@ -1783,6 +1816,7 @@ UNTIL ccDone {
     }
   }
 
+  SET aoaCap TO aoaLimitNow().
   SET pitchCmd TO steerFpa(fpaWant, CC_PITCH_MIN, CC_PITCH_MAX, dtStep).
 
   // ---- dV policing --------------------------------------------------------
@@ -2000,6 +2034,10 @@ UNTIL ccDone {
     PRINT "      fpa " + ROUND(fpaNow(), 1) + "/" + ROUND(fpaWant, 1) + " | pitch " +
           ROUND(pitchCmd, 1) + " | acc " + ROUND(accelNow, 2) + " | TWR " +
           ROUND(twrNow(), 2) + " | dV " + ROUND(rocketDv()).
+    // AoA and the drag it is buying, because this is where the climb is won or
+    // lost and neither was visible on the flight that spent 330 m/s to buy 40.
+    PRINT "      AoA " + ROUND(pitchCmd - fpaNow(), 1) + "/" + ROUND(aoaCap, 1) +
+          " | Q " + ROUND(SHIP:Q, 3) + " | drag " + ROUND(dragNow(accelNow)) + " kN".
     LOCAL flatNote IS "".
     IF emergency { SET flatNote TO " | FLAT-BURN (orbit priced out)". }
     PRINT "      PE " + ROUND(SHIP:PERIAPSIS / 1000, 1) + " km | apex in " +
@@ -2192,6 +2230,21 @@ IF wholeMeasured {
 PRINT "  dV left    : " + ROUND(dvLeft) + " m/s  (our tanks only)".
 PRINT "  Deorbit    : " + ROUND(dvDeorb) + " m/s  ->  spare after deorbit " +
       ROUND(dvLeft - dvDeorb) + " m/s".
+// The same propellant, priced after the cargo is gone.  Every dV figure above is
+// computed at the ship's *current* mass, payload included, but the deorbit burn
+// happens after the payload is released - on a much lighter ship, where the same
+// tonnes in the tank are worth far more.  Budgeting the reserve at the heavy
+// mass is a real reserve the ship does not need to carry, and on a 27% payload
+// fraction it is most of the reserve.
+IF payloadMass > 1 AND rocketPropMass() > 0 {
+  LOCAL mLight IS SHIP:MASS - payloadMass.
+  IF mLight > rocketPropMass() {
+    LOCAL dvLight IS RKT_ISP * G0 * LN(mLight / (mLight - rocketPropMass())).
+    PRINT "  After release of " + ROUND(payloadMass, 1) + " t of payload the same".
+    PRINT "  propellant is worth " + ROUND(dvLight) + " m/s (x" +
+          ROUND(dvLight / MAX(1, dvLeft), 2) + ") - deploy before deorbiting.".
+  }
+}
 PRINT "  Fuel -- LF: " + ROUND(coreResAmt("LiquidFuel")) +
       " , Ox: " + ROUND(coreResAmt("Oxidizer")) +
       " , Mono: " + ROUND(resAmtShip("MonoPropellant")).

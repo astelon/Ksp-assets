@@ -9,8 +9,10 @@ is from that flight's own console output.
 > half-minute after the mode switch and says nothing about the rest of the climb.
 > `docs/CLIMB_LOSS_REVIEW.md` works through how, and reconciles the same airframe
 > against a flight that reached 104 × 99 km: the real whole-climb figure is about
-> **×1.22**. The `PLAN_LOSS_FACTOR` 1.50 → 1.75 recalibration below followed from
-> the bad number and has since been reset to **1.30**. The rest of this review —
+> **×1.66**, measured end to end on a flight that reached orbit. The
+> `PLAN_LOSS_FACTOR` 1.50 → 1.75 recalibration below followed from the bad number
+> and is now **1.65** — close to 1.75 by coincidence, not by derivation. The
+> rest of this review —
 > the air-breathing profile, the dive, the mode-switch pricing — is unaffected,
 > because none of it depends on the loss factor.
 

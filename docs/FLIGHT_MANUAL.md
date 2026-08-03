@@ -238,7 +238,8 @@ The ascent tunables worth knowing if a flight goes wrong:
 | `CC_DEAD_CONFIRM` | 4 | Consecutive no-thrust samples (0.5 s apart) before the rocket phase decides the engine has stopped and ends the climb. |
 | `PLAN_SWITCH_ALT` / `PLAN_SWITCH_SPD` | 20 km / 1450 m/s | Handover state the pre-flight check assumes. Trim to what your ship actually achieves — the script prints it at the real switch. |
 | `PLAN_JET_DV` | 3000 m/s | Jet-phase ΔV equivalent, incl. drag. Sets how much LF the check expects the jets to burn. |
-| `PLAN_LOSS_FACTOR` | 1.30 | Gravity/drag/steering losses assumed on the rocket climb, pre-flight only. Measured ×1.22 on this airframe — see `docs/CLIMB_LOSS_REVIEW.md`. The post-flight block prints the value your flight actually achieved. |
+| `PLAN_LOSS_FACTOR` | 1.65 | Whole-climb gravity/drag/steering losses from the handover, pre-flight only. Measured ×1.66 end-to-end on this airframe. Do **not** set it from the in-flight window figure (×1.31) — that describes the cheap end of the climb. See `docs/CLIMB_LOSS_REVIEW.md`. |
+| `CC_AOA_HIQ` | 6° | Angle of attack the rocket phase may present to the flow while `SHIP:Q` is above `CC_AOA_Q_HI`. The reference flight flew the opening at 16.4° and paid 2335 kN of drag for it. Set to `AOA_TRIM_MAX` (14°) to restore the old behaviour. |
 | `ISOLATE_PAYLOAD` | `TRUE` | Keeps the payload's propellant out of the ΔV budget and out of the engines. `FALSE` lets the ascent drink it — on the Mk3 Titan that is 1491 → 3168 m/s at the handover, and 34 t of cargo that does not arrive. |
 | `PLAN_TWR_MIN` | 1.05 | Closed-cycle TWR the sizing advice tries to hold at handover. |
 | `PREFLIGHT_HOLD` | 12 s | Pause on a failed check so you can read it. 0 to skip. |

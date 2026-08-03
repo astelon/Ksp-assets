@@ -13,10 +13,10 @@ The pre-flight check declared the airframe short on the runway:
    (needs 1766, has 1491 at handover)
 ```
 
-**That verdict is wrong, and it is wrong for the same reason the flight failed.**
-See [The pre-flight check was wrong too](#the-pre-flight-check-was-wrong-too) at
-the end — `PLAN_LOSS_FACTOR` had been calibrated from a number the broken
-measurement produced.
+It over-states, but not by as much as it looks: a later flight of the same
+airframe reached a 92 km orbit and deorbited, which puts the real shortfall at
+roughly **117 m/s** rather than 275. See
+[the confirmation flight](#confirmation-flight--main-manual-takeover) below.
 
 270.6 t launch mass, 72 t of it payload — a 27% payload fraction, with 1491 m/s
 of paired propellant in the ship's own tanks at the handover.
@@ -146,67 +146,183 @@ ignition fault rather than an empty ship, and the next flight should show which.
 Total thrust loss only: one flamed-out RAPIER out of fourteen is not a reason to
 end a climb the other thirteen are still flying.
 
-## The pre-flight check was wrong too
 
-The same ship, at the same 270.6 t, flown by the **PR #2 autopilot** — the
-147-line fixed-schedule original, no ΔV budgeting, no feasibility check, a flat
-12° air-breathing climb and a 25°→5° rocket taper — reached orbit:
+---
+
+# Confirmation flight — main, manual takeover
+
+A second flight of the same airframe on `main` (without any of the fixes above),
+where the pilot cancelled the autopilot at the abort and flew the rest by hand.
+It reached **92.2 × 91.6 km**, and after releasing the payload had enough left to
+deorbit. This is the flight that settles the arguments.
+
+## The contradiction, in the ship's own words
+
+At the mode switch:
 
 ```
-ORBIT ACHIEVED
-  Apoapsis : 104.07 km
-  Periapsis: 99.01 km
-  Inclination: 0.05 deg
-  Fuel remaining -- LiquidFuel: 8097 , Oxidizer: 9071 , Monoprop: 100
+Mode switch: jets out of acceleration (0.12 m/s^2).
+  at 23.2 km, 1418 m/s, pitch 8.5 deg.
+  Handover 23.2 km / 1418 m/s (planned 21 / 1400).
+Closed cycle. dV 1499 vs need 1267 (climb 970 + circ 139 + deorbit 58 + margin 100) @ loss x1.15
+  Mass 245.8 t, thrust 2517 kN, TWR 1.13, Isp 305 s.
 ```
 
-Reconciling that against the pre-flight print of the pad state (1337 m/s of
-pairs in our tanks, a 4929-unit LF-only reserve, 5760 LF / 7040 Ox of cargo):
+**Feasible, with 232 m/s to spare.** Thirty-one seconds and 378 m/s later:
+
+```
+!! CANNOT REACH ORBIT. Even a 78 km apoapsis is out of budget.
+   dV 1121 vs need 5154 (climb 4891 + circ 122 + deorbit 40 + margin 100) @ loss x6.39
+```
+
+The impulsive climb estimate barely moved — 843 m/s at the switch, 765 at the
+abort, because the ship had made real progress. Only the loss factor moved, 1.15
+→ 6.39, and it multiplied a number that was already nearly right into one four
+times the size of the tanks.
+
+## What the fixes in this PR would have done
+
+Splitting the flight at the abort and pricing each half against its own
+telemetry:
+
+| | spent | impulsive work | measured |
+|---|---|---|---|
+| Opening — handover → 27.9 km | 330 m/s | 40 m/s of orbital energy | **×8.2** |
+| Rest — 27.9 km → 92 km orbit (by hand) | 1115 m/s | climb 810 + circ 56 | **×1.31** |
+| Whole rocket phase | 1445 m/s | climb 843 + circ 66 | **×1.66** |
+
+- The **trailing window** reads ×1.31 for the second half. That is the number the
+  settle decision needed and it says the orbit was affordable — which it was,
+  because the pilot then flew it. The cumulative ×6.39 said it was 4033 m/s out
+  of reach.
+- The **pressure gate** would have held the terminal verdict until ≈33 km. The
+  abort fired at 29 km.
+- **×8.2 in the opening is real, not an artefact.** The old code's mistake was
+  extrapolating it, not measuring it.
+
+## The opening is where the mission is lost
+
+330 m/s of the ship's 1499 went into the first 31 seconds and bought 40 m/s of
+orbital energy — **12% efficient**. Working the loss back out of the force
+balance:
 
 | | |
 |---|---|
-| Burned | 11371 LF / 8698 Ox = **100.3 t** |
-| In orbit | **170.3 t** |
-| Jets took | 4254 LF — inside the LF-only reserve, 675 units spare |
-| Rocket burned | 79.1 t: 249.3 t → 170.3 t = **1141 m/s** for climb + circularisation |
+| Thrust available | 2517 kN on 245.8 t = **10.2 m/s²** |
+| Loss (drag + cosine; gravity is already in the energy sum) | **9.5 m/s²** ≈ 2335 kN |
+| Dynamic pressure | 0.20 atm |
+| Implied Cd·A | **≈115 m²** |
+| Commanded pitch 21.8° at fpa 5.4° | **16.4° of angle of attack** |
 
-The model priced that same climb and circularisation at **1608 m/s** (climb 1540
-+ circ 68). Solving `1141 = 880 × L + 68` for the impulsive 880 m/s climb gives
-a real loss factor of **×1.22**, against the `PLAN_LOSS_FACTOR` of 1.75 the check
-was using — and 1.75 came from the ×3.21 recorded in `ASCENT_REVIEW.md`, which
-was produced by the identical cumulative `spent / paid` calculation this review
-is about. **The broken measurement poisoned the pre-flight constant, and the
-pre-flight constant then condemned a ship that flies.**
+`AOA_TRIM_MAX` is 14°, so the trim was saturated and the real angle was larger
+still — the trim clamp limits the trim, not the angle the airframe presents,
+and while the flight path lags the command the difference is the fpa error.
+Body drag on a Mk3 stack scales with the sine of that angle, and a 40 m fuselage
+at 16° presents roughly five times the area it does at 0°. That is where the
+2335 kN comes from, and it is 93% of the engines' output.
 
-`PLAN_LOSS_FACTOR` is now **1.30** — the measured 1.22 plus a little back, for
-the reason below. On this airframe that reads *needs 1370, has 1491* — a GO with
-8.8% in hand, where 1.75 read *short by 275*.
+**Fix.** `CC_AOA_HIQ` (6°) caps the angle presented to the flow while `SHIP:Q` is
+above `CC_AOA_Q_HI` (0.10 atm), opening to the full `AOA_TRIM_MAX` by
+`CC_AOA_Q_LO` (0.02 atm). The clamp is applied to `pitch − fpa`, not to the trim.
+The rocket phase also now reports AoA, Q and drag every cycle, because none of
+this was visible on either flight.
 
-### The caveat, which is not small
+> **This is the one change in this PR with no flight data behind it.** The
+> reasoning is sound and the instrumentation will confirm or refute it in one
+> flight, but a ship at TWR 1.13 that is told to fly flatter will accelerate
+> instead of climbing, and wants watching the first time. `CC_AOA_HIQ = 14`
+> restores the old behaviour exactly.
 
-PR #2 has no payload isolation, and stock fuel flow is proportional across every
-connected tank. Of the 100.3 t it burned, **34.1 t came out of the cargo tanks**
-— about a third of the entire ascent was flown on the payload's propellant. The
-current script blocks that deliberately, so the isolated ship carries those 34 t
-all the way to orbit and will pay a little more in gravity loss for it. Hence
-1.30 rather than 1.22; the difference is an estimate, not a measurement, and the
-first flight that gets to the top under the fixed script will replace it with
-the `PLAN_LOSS_FACTOR` line the post-flight block now prints.
+## `PLAN_LOSS_FACTOR` — corrected again, to 1.65
 
-The pre-flight advice states the choice outright rather than making it:
+An earlier revision of this document set it to **1.30** on the strength of the
+PR #2 flight. That was wrong, and the mistake is worth naming because it is the
+same one the old code made: **1.30 is a marginal-climb figure and
+`PLAN_LOSS_FACTOR` is a whole-climb constant.** It prices a climb starting at the
+handover, so it has to carry the opening, and the opening is ×8.2.
+
+This flight measures the whole thing end to end: 1445 m/s spent from a 1499 m/s
+handover, against an impulsive 843 climb + 66 circ, with 54 m/s left in an
+92 km orbit. Solving gives **×1.66**.
+
+| `PLAN_LOSS_FACTOR` | bill | vs the 1499 it had | verdict |
+|---|---|---|---|
+| 1.30 | 1321 | +178 | GO — wrong, it did not have 178 spare |
+| **1.65** | **1616** | **−117** | short by ~117 — matches the ~129 it really was |
+| 1.75 (original) | 1700 | −201 | over-states by ~70 |
+
+The PR #2 number (×1.22) was not a lie, it was a different flight: no payload
+isolation, so a third of what it burned came out of the cargo tanks, and a ship
+shedding mass that fast climbs at a TWR this one never sees.
+
+---
+
+# What to change on the ship
+
+Ranked by ΔV per unit of effort, all from the two flights' own telemetry.
+
+### 1. Deploy the payload before deorbiting — free, and worth ~75 m/s of budget
+
+The flight ended with **54 m/s** aboard, which is less than the deorbit burn plus
+margin the script demands. After releasing 72 t of payload the same propellant
+was worth **103 m/s**, which deorbited it comfortably.
+
+Every ΔV figure in the script is computed at the ship's *current* mass, so the
+deorbit reserve is priced with the cargo still aboard — at roughly **1.9× what it
+actually costs**. On a 27% payload fraction that is most of the reserve. The
+post-flight report now prints both numbers. Budget the reserve at the light mass
+and the 117 m/s shortfall above becomes roughly 40.
+
+*Caveat: this only holds if the payload really does come off. Keep the heavy-mass
+reserve for any flight that might have to bring it home.*
+
+### 2. Hand over earlier — the jets are ridden past the point of profit
 
 ```
-* PAYLOAD FUEL: the cargo tanks hold 5760 LF / 7040 Ox, locked out as cargo.
-  Counting them would put 3168 m/s at the handover instead of 1491.
-  SET ISOLATE_PAYLOAD TO FALSE. only if that fuel is propellant
-  and not deliverable cargo - the engines will drink it.
+alt 21.2 km | 1296 m/s | acc 3.21 | vs 67/65  | cost/m/s: jet 16.7 vs rocket 128
+alt 22.8 km | 1370 m/s | acc 1.79 | vs 34/48  | cost/m/s: jet 18.2 vs rocket 108
+alt 23.2 km | 1387 m/s | acc 1.12 | vs 21/17  | cost/m/s: jet 24.8 vs rocket 108
+alt 23.4 km | 1405 m/s | acc 1.26 | vs -2/5   | cost/m/s: jet 20.5 vs rocket 103
+alt 23.2 km | 1417 m/s | acc 0.52 | vs -13/0  | cost/m/s: jet 50.3 vs rocket 114
 ```
 
-3168 against 1491 is why PR #2 sailed to 104 km with no budgeting at all. Whether
-that is a success or a theft is a question about the mission, not the ascent.
+The priced switch test compares **fuel per m/s of speed**, and by that measure
+the jets are still 2.3× cheaper at the switch (50.3 vs 114 kg/m/s) — so the test
+never fires. What ends the phase is `SW_MIN_ACCEL`, at 0.12 m/s².
 
-### Still worth doing
+But look at the vertical speed column: the last 1.6 km of jet climb turned +67
+m/s of climb into **−13 m/s of sink** while buying 121 m/s of airspeed. The
+rocket then inherits a *descending* ship at TWR 1.13, in air thick enough to
+charge 0.2 atm, and has to arrest the sink and climb out — which is the ×8.2
+opening. The switch test prices the fuel and ignores the **state** it hands over.
 
-The jets ate **107 units of paired LF** — rocket ΔV burnt as jet fuel. 121 units
-of LF-only reserve (+0.6 t) closes that leak and lifts the handover by 19 m/s.
-It is the cheapest fix on the list and it is real whatever else is decided.
+Cheapest experiment: leave the code alone and set `SW_MIN_ACCEL` to ~1.5 m/s², or
+`SW_ALT_HARD` to 22000. Either hands over while the jets still have climb
+authority. The instrumentation added in this PR will show whether the opening
+gets cheaper.
+
+### 3. The airframe — 27% payload fraction is the real constraint
+
+RAPIER SSTOs to LKO typically manage 10–15%. Everything above is recovering
+margin the design does not have. In rough order of value:
+
+- **+0.6 t of LF-only** (121 units). The jets ate **107 units of paired LF** —
+  rocket ΔV burned at jet Isp. Cheapest fix on the list, worth ~19 m/s, and it
+  costs almost nothing.
+- **More thrust, not more fuel.** Closed-cycle TWR at handover was **1.13**. The
+  opening loss is a TWR problem as much as a drag problem: a 31-second burn at
+  1.13 spends its whole first minute unable to climb and accelerate at once. Two
+  or three more RAPIERs change the shape of the opening in a way no guidance
+  change can.
+- **Or ~10 t less payload**, or a **~90 km target**. The ship made 92 km by hand
+  with fuel to deorbit; that is the orbit this airframe currently has, and
+  `RUN ascent(90000).` asks for it honestly instead of discovering it at 29 km.
+
+### 4. What is already fine
+
+- The **air-breathing phase is efficient** — it holds its Q corridor at 0–5° of
+  AoA and 9–10 m/s² of acceleration for most of the climb, and delivers 2932 m/s
+  of jet ΔV for a 1418 m/s handover. Do not tune it.
+- The **LF-only reserve accounting works**: rocket ΔV *rose* from 1432 to 1506
+  during the jet climb, exactly as intended — the jets burning unpaired LF
+  lighten the ship without touching a paired unit.
