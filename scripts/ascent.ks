@@ -122,6 +122,12 @@ SET PLAN_MECO_PE        TO -50000.  // periapsis assumed when pricing an orbit w
                                     // pessimistic, so circ dV is over-quoted)
 SET LFO_LF_RATIO        TO 9.       // stock LF:Ox mixture ratio, LF part
 SET LFO_OX_RATIO        TO 11.      // ... Ox part
+SET DEPLOY_BEFORE_DEORBIT TO TRUE.  // the payload is released in orbit, so the
+                                    // deorbit burn is flown on the light ship and
+                                    // the reserve is priced accordingly.  FALSE
+                                    // reserves enough to deorbit with the cargo
+                                    // still aboard - set it for any flight that
+                                    // might have to bring the payload home
 SET ISOLATE_PAYLOAD     TO TRUE.    // block crossfeed on the payload separator
 SET FORCE_TANK_LOCK     TO FALSE.   // also disable flow on payload tanks (only
                                     // needed if the separator has no crossfeed
@@ -755,10 +761,33 @@ FUNCTION deorbitDvFrom {
   RETURN MAX(0, vCircAt(apAlt) - SQRT(BODY_MU * (2 / rA - 1 / smaT))).
 }
 
+// A dV figure quoted for the *light* ship, converted into what it costs on the
+// gauge here, with the cargo still aboard.
+//
+// Every dV number in this script is a reading on the ship as it is now.  The
+// deorbit burn is not: it happens after the payload is released, on a ship that
+// can be half the mass, where the same tonnes of propellant are worth far more.
+// Reserving the post-release figure against the pre-release gauge sets aside
+// roughly twice the propellant the burn will actually use, and on a 27% payload
+// fraction that is enough to price a reachable orbit out of reach.  The
+// reference flight is the proof: it reached orbit holding 54 m/s - under the
+// 158 m/s reserve this script demands - released 72 t of payload, found itself
+// holding 103 m/s, and deorbited on it comfortably.
+FUNCTION heavyEquivalentOf {
+  PARAMETER dvLight.
+  IF NOT DEPLOY_BEFORE_DEORBIT OR payloadMass <= 1 { RETURN dvLight. }
+  LOCAL vEx IS RKT_ISP * G0.
+  LOCAL mLight IS SHIP:MASS - payloadMass.
+  IF mLight <= 0 OR vEx <= 0 { RETURN dvLight. }
+  LOCAL prop IS mLight * (1 - CONSTANT:E ^ (-dvLight / vEx)).
+  IF prop <= 0 OR SHIP:MASS <= prop { RETURN dvLight. }
+  RETURN MIN(dvLight, vEx * LN(SHIP:MASS / (SHIP:MASS - prop))).
+}
+
 // What must still be in the tanks *after* we are circular at apAlt.
 FUNCTION reserveDvFor {
   PARAMETER apAlt.
-  RETURN deorbitDvFrom(apAlt) + DV_MARGIN.
+  RETURN heavyEquivalentOf(deorbitDvFrom(apAlt) + DV_MARGIN).
 }
 
 // Impulsive estimate of the dV still needed to raise apoapsis to apAlt from
@@ -1130,11 +1159,15 @@ FUNCTION anyFlameout {
 
 FUNCTION budgetLine {               // one-line dV status, used throughout
   PARAMETER apAlt, lossFactor.
+  LOCAL resNote IS "".
+  IF DEPLOY_BEFORE_DEORBIT AND payloadMass > 1 {
+    SET resNote TO "*".             // priced after the payload comes off
+  }
   RETURN "dV " + ROUND(rocketDv()) + " vs need " + ROUND(priceOfOrbit(apAlt, lossFactor)) +
          " (climb " + ROUND(dvToRaiseApTo(apAlt) * lossFactor) +
          " + circ " + ROUND(circDvAt(apAlt)) +
-         " + deorbit " + ROUND(deorbitDvFrom(apAlt)) +
-         " + margin " + ROUND(DV_MARGIN) + ") @ loss x" + ROUND(lossFactor, 2).
+         " + reserve " + ROUND(reserveDvFor(apAlt)) + resNote +
+         ") @ loss x" + ROUND(lossFactor, 2).
 }
 
 // ---------------------------------------------------------------------------
@@ -1702,6 +1735,11 @@ SET effWindows   TO 0.              // completed windows so far
 SET deadWindows  TO 0.              // ...of which consecutive ones bought nothing
 
 PRINT "Closed cycle. " + budgetLine(targetAp, lossFactor).
+IF DEPLOY_BEFORE_DEORBIT AND payloadMass > 1 {
+  PRINT "  (reserve* = deorbit " + ROUND(deorbitDvFrom(targetAp)) + " + margin " +
+        ROUND(DV_MARGIN) + " flown after " + ROUND(payloadMass, 1) +
+        " t of payload comes off.)".
+}
 PRINT "  Mass " + ROUND(SHIP:MASS, 1) + " t, thrust " + ROUND(SHIP:AVAILABLETHRUST) +
       " kN, TWR " + ROUND(twrNow(), 2) + ", Isp " + ROUND(RKT_ISP) + " s.".
 
@@ -2038,6 +2076,12 @@ UNTIL ccDone {
     // lost and neither was visible on the flight that spent 330 m/s to buy 40.
     PRINT "      AoA " + ROUND(pitchCmd - fpaNow(), 1) + "/" + ROUND(aoaCap, 1) +
           " | Q " + ROUND(SHIP:Q, 3) + " | drag " + ROUND(dragNow(accelNow)) + " kN".
+    // The loss factor every cycle, not only when it triggers a verdict.  On the
+    // reference flights the first anyone heard of it was the abort message.
+    IF lossMeasured {
+      PRINT "      loss x" + ROUND(lossFactor, 2) + " over the last " +
+            ROUND(EFF_WINDOW_DV) + " m/s (" + effWindows + " windows)".
+    }
     LOCAL flatNote IS "".
     IF emergency { SET flatNote TO " | FLAT-BURN (orbit priced out)". }
     PRINT "      PE " + ROUND(SHIP:PERIAPSIS / 1000, 1) + " km | apex in " +
@@ -2136,8 +2180,14 @@ IF NOT abortSuborbital {
   SET circPeTarget TO MIN(circPeTarget, orbitAlt - 500).
   PRINT "Circularising at " + ROUND(orbitAlt / 1000, 1) + " km; PE target " +
         ROUND(circPeTarget / 1000, 1) + " km.".
-  PRINT "  Protecting " + ROUND(reserveDvFor(orbitAlt)) + " m/s (deorbit " +
-        ROUND(deorbitDvFrom(orbitAlt)) + " + margin " + ROUND(DV_MARGIN) + ").".
+  IF DEPLOY_BEFORE_DEORBIT AND payloadMass > 1 {
+    PRINT "  Protecting " + ROUND(reserveDvFor(orbitAlt)) + " m/s here = deorbit " +
+          ROUND(deorbitDvFrom(orbitAlt)) + " + margin " + ROUND(DV_MARGIN) +
+          " once the payload is off.".
+  } ELSE {
+    PRINT "  Protecting " + ROUND(reserveDvFor(orbitAlt)) + " m/s (deorbit " +
+          ROUND(deorbitDvFrom(orbitAlt)) + " + margin " + ROUND(DV_MARGIN) + ").".
+  }
 
   SET dvCheckT    TO TIME:SECONDS.
   SET thrCmd TO 1.
@@ -2252,14 +2302,29 @@ IF PAY_TANKS:LENGTH > 0 {
   PRINT "  Payload LF/Ox (locked out): " + ROUND(listResAmt(PAY_TANKS, "LiquidFuel")) +
         " / " + ROUND(listResAmt(PAY_TANKS, "Oxidizer")).
 }
+// Answer the funding question at the mass the burn will be flown at.  dvLeft is
+// a reading on the ship as it sits, cargo aboard; comparing it against a deorbit
+// figure that will be flown after release is what made the reference flight look
+// stranded at 54 m/s when it was holding enough for a comfortable deorbit.
 IF NOT inOrbit {
   PRINT "  No deorbit burn required - the trajectory already reenters.".
-} ELSE IF dvLeft >= dvDeorb + DV_MARGIN {
-  PRINT "  DEORBIT FUNDED - RUN deorbit_land. when you are ready.".
-} ELSE IF dvLeft >= dvDeorb {
-  PRINT "  Deorbit funded but with no margin - deorbit promptly.".
 } ELSE {
-  PRINT "  !! DEORBIT NOT FUNDED - refuel, or lower PE on RCS monopropellant.".
+  LOCAL needFunded IS heavyEquivalentOf(dvDeorb + DV_MARGIN).
+  LOCAL needBare   IS heavyEquivalentOf(dvDeorb).
+  IF DEPLOY_BEFORE_DEORBIT AND payloadMass > 1 {
+    PRINT "  Deorbit costs " + ROUND(needBare) + " m/s of what is on the gauge now" +
+          " (" + ROUND(dvDeorb) + " m/s after release).".
+  }
+  IF dvLeft >= needFunded {
+    PRINT "  DEORBIT FUNDED - RUN deorbit_land. when you are ready.".
+  } ELSE IF dvLeft >= needBare {
+    PRINT "  Deorbit funded but with no margin - deorbit promptly.".
+  } ELSE {
+    PRINT "  !! DEORBIT NOT FUNDED - refuel, or lower PE on RCS monopropellant.".
+  }
+  IF DEPLOY_BEFORE_DEORBIT AND payloadMass > 1 {
+    PRINT "  RELEASE THE PAYLOAD FIRST - that is what these numbers assume.".
+  }
 }
 PRINT "======================================================".
 PRINT "Autopilot complete. Ship handed back to pilot (SAS on).".

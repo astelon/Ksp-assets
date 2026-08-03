@@ -261,20 +261,49 @@ shedding mass that fast climbs at a TWR this one never sees.
 
 Ranked by ΔV per unit of effort, all from the two flights' own telemetry.
 
-### 1. Deploy the payload before deorbiting — free, and worth ~75 m/s of budget
+### 1. The deorbit reserve was priced at the wrong mass — now fixed in code
 
-The flight ended with **54 m/s** aboard, which is less than the deorbit burn plus
-margin the script demands. After releasing 72 t of payload the same propellant
-was worth **103 m/s**, which deorbited it comfortably.
+This one was not advice, it was a defect, and it is the difference between the
+fixed script flying this mission and still giving up on it.
 
-Every ΔV figure in the script is computed at the ship's *current* mass, so the
-deorbit reserve is priced with the cargo still aboard — at roughly **1.9× what it
-actually costs**. On a 27% payload fraction that is most of the reserve. The
-post-flight report now prints both numbers. Budget the reserve at the light mass
-and the 117 m/s shortfall above becomes roughly 40.
+Replaying the flight through the fixed code: at 33.7 km — the first point where
+the pressure gate lets the terminal verdict be pronounced — the window reads
+×1.29 and the bill comes to
 
-*Caveat: this only holds if the payload really does come off. Keep the heavy-mass
-reserve for any flight that might have to bring it home.*
+```
+climb 720 + circ 39 + deorbit 40 + margin 100 = 899   vs   892 in the tanks
+```
+
+**Short by 7 m/s.** So even with every fix above, the script writes off an orbit
+the pilot then flew by hand. Seven metres per second.
+
+The seven are an artefact. Every ΔV figure in the script is a reading on the ship
+*as it is now*, cargo aboard. The deorbit burn is not: it is flown after the
+payload is released, on a ship less than half the mass, where the same tonnes of
+propellant are worth roughly **1.9×** as much. The flight is the proof — it
+reached orbit holding **54 m/s**, under the 158 m/s reserve the script demands,
+released 72 t, found itself holding **103 m/s**, and deorbited on it comfortably.
+
+Priced at the mass the burn is actually flown at, that 140 m/s of reserve is
+4.0 t of propellant, which is **76 m/s** on the gauge at 33.7 km:
+
+```
+climb 720 + circ 39 + reserve 76 = 835   vs   892   ->   affordable by 57
+```
+
+**Fix.** `reserveDvFor()` converts the post-release requirement into its
+heavy-mass equivalent, gated by `DEPLOY_BEFORE_DEORBIT` (default `TRUE`). The
+budget lines mark the converted figure with `*` and the closed-cycle print spells
+out what it means. The final funding verdict does the same conversion, so a ship
+holding 54 m/s is no longer told it is stranded when it is not.
+
+`DV_GLIDE_RESERVE` (120 m/s) is deliberately left alone as an absolute floor, so
+in practice the ship still arrives holding ~120 m/s rather than the ~76 the
+deorbit strictly needs.
+
+*Set `DEPLOY_BEFORE_DEORBIT TO FALSE.` for any flight that might have to bring
+the payload home. Even then the deorbit stays funded — 76 m/s covers a 40 m/s
+burn — but the margin is the thing you lose.*
 
 ### 2. Hand over earlier — the jets are ridden past the point of profit
 
