@@ -232,9 +232,16 @@ The ascent tunables worth knowing if a flight goes wrong:
 | `CC_FPA_HI` / `CC_FPA_LO` | 15° / 0° | Rocket-phase flight-path schedule, tapering as apoapsis approaches target. |
 | `CC_ACC_LOW` | 1.5 m/s² | Below this the rocket phase shallows out rather than fighting gravity. |
 | `DV_GLIDE_RESERVE` | 120 m/s | The floor the ascent will never burn through. |
+| `EFF_WINDOW_DV` | 120 m/s | Rocket ΔV per climb-efficiency window. The measured loss factor describes the last window only, not the burn so far — see `docs/CLIMB_LOSS_REVIEW.md`. Shorten it for a twitchier reading, lengthen it for a steadier one. |
+| `EFF_VERDICT_P` | 0.005 | Ambient pressure, as a fraction of sea level, below which the rocket phase is allowed to declare no orbit reachable. ≈33 km on Kerbin. Raise it only if you want that call made earlier and on worse evidence. |
+| `EFF_MIN_WINDOWS` | 2 | Windows of evidence needed before that call, and the number of consecutive dead windows that override the pressure gate. |
+| `CC_DEAD_CONFIRM` | 4 | Consecutive no-thrust samples (0.5 s apart) before the rocket phase decides the engine has stopped and ends the climb. |
 | `PLAN_SWITCH_ALT` / `PLAN_SWITCH_SPD` | 20 km / 1450 m/s | Handover state the pre-flight check assumes. Trim to what your ship actually achieves — the script prints it at the real switch. |
 | `PLAN_JET_DV` | 3000 m/s | Jet-phase ΔV equivalent, incl. drag. Sets how much LF the check expects the jets to burn. |
-| `PLAN_LOSS_FACTOR` | 1.50 | Gravity/drag/steering losses assumed on the rocket climb, pre-flight only. |
+| `PLAN_LOSS_FACTOR` | 1.65 | Whole-climb gravity/drag/steering losses from the handover, pre-flight only. Measured ×1.66 end-to-end on this airframe. Do **not** set it from the in-flight window figure (×1.31) — that describes the cheap end of the climb. See `docs/CLIMB_LOSS_REVIEW.md`. |
+| `CC_AOA_HIQ` | 6° | Angle of attack the rocket phase may present to the flow while `SHIP:Q` is above `CC_AOA_Q_HI`. The reference flight flew the opening at 16.4° and paid 2335 kN of drag for it. Set to `AOA_TRIM_MAX` (14°) to restore the old behaviour. |
+| `DEPLOY_BEFORE_DEORBIT` | `TRUE` | Prices the deorbit reserve at the mass the burn is actually flown at — after the payload is released. The same propellant is worth ~1.9x on the light ship, and reserving the light-ship figure against the heavy-ship gauge sets aside twice what the burn uses. `FALSE` reserves enough to deorbit with the cargo still aboard. |
+| `ISOLATE_PAYLOAD` | `TRUE` | Keeps the payload's propellant out of the ΔV budget and out of the engines. `FALSE` lets the ascent drink it — on the Mk3 Titan that is 1491 → 3168 m/s at the handover, and 34 t of cargo that does not arrive. |
 | `PLAN_TWR_MIN` | 1.05 | Closed-cycle TWR the sizing advice tries to hold at handover. |
 | `PREFLIGHT_HOLD` | 12 s | Pause on a failed check so you can read it. 0 to skip. |
 | `ABORT_IF_INFEASIBLE` | `FALSE` | `TRUE` cuts the burn the moment orbit is priced out of reach, keeping the most fuel for a return. |

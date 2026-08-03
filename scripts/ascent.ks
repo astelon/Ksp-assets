@@ -122,6 +122,12 @@ SET PLAN_MECO_PE        TO -50000.  // periapsis assumed when pricing an orbit w
                                     // pessimistic, so circ dV is over-quoted)
 SET LFO_LF_RATIO        TO 9.       // stock LF:Ox mixture ratio, LF part
 SET LFO_OX_RATIO        TO 11.      // ... Ox part
+SET DEPLOY_BEFORE_DEORBIT TO TRUE.  // the payload is released in orbit, so the
+                                    // deorbit burn is flown on the light ship and
+                                    // the reserve is priced accordingly.  FALSE
+                                    // reserves enough to deorbit with the cargo
+                                    // still aboard - set it for any flight that
+                                    // might have to bring the payload home
 SET ISOLATE_PAYLOAD     TO TRUE.    // block crossfeed on the payload separator
 SET FORCE_TANK_LOCK     TO FALSE.   // also disable flow on payload tanks (only
                                     // needed if the separator has no crossfeed
@@ -145,7 +151,19 @@ SET PLAN_JET_DV_K    TO 2.2.        // jet dV per m/s of handover speed at TWR
                                     // 0.5; a draggy, slow-accelerating airframe
                                     // spends far longer fighting drag, so the
                                     // multiplier falls as take-off TWR rises
-SET PLAN_LOSS_FACTOR TO 1.75.       // gravity/drag/steering losses, rocket climb
+SET PLAN_LOSS_FACTOR TO 1.65.       // gravity/drag/steering losses, rocket climb.
+                                    // This prices the climb *from the handover*,
+                                    // so it has to include the opening, which is
+                                    // where nearly all of it is spent: the
+                                    // reference flight burned 330 of its 1499 m/s
+                                    // in the first 31 s at 12% efficiency and
+                                    // flew the remaining 1115 at x1.31.  End to
+                                    // end that is x1.66, and it is the end-to-end
+                                    // number this constant wants.  Do not set it
+                                    // from the in-flight window figure - that one
+                                    // describes the cheap end of the climb and is
+                                    // a different question.  See
+                                    // docs/CLIMB_LOSS_REVIEW.md.
 SET PLAN_TWR_MIN     TO 1.05.       // closed-cycle TWR wanted at the handover
 SET PLAN_JET_ISP     TO 3200.       // air-breathing Isp if it cannot be read (s)
 SET PLAN_GO_MARGIN   TO 0.08.       // dV in hand, as a fraction of the bill,
@@ -283,9 +301,52 @@ SET CC_TAP_MIN     TO 25.           // keep at least this long to the apex (s)
 SET CC_TAP_GAIN    TO 0.35.         // deg of extra climb per second short of it
 SET CC_TAP_MAX_ADD TO 12.           // ... clamped (deg)
 SET CC_POLICE_DT   TO 0.5.          // dV re-pricing interval (s)
-SET FEAS_ARM_DV    TO 350.          // rocket dV spent before trusting the measured
-                                    // climb efficiency (m/s)
+// --- angle of attack in the rocket phase ------------------------------------
+//  The trim loop will spend whatever angle it takes to hold the commanded
+//  flight path, and just after the handover that is all of it.  On the
+//  reference flight the trim sat on its 14 deg clamp and the airframe met the
+//  flow at 16.4 deg while still in 0.2 atm of dynamic pressure: 2335 kN of
+//  drag, 9.5 of the 10.2 m/s^2 the engines were making, 330 m/s of rocket fuel
+//  spent to buy 40 m/s of orbital energy.  Body drag on a Mk3 stack grows with
+//  the sine of the angle it presents, so the angle has to be rationed while the
+//  air can still charge for it.  Setting CC_AOA_HIQ to AOA_TRIM_MAX restores
+//  the old behaviour.
+SET CC_AOA_HIQ     TO 6.            // AoA allowed while the air still bites (deg)
+SET CC_AOA_Q_HI    TO 0.10.         // ... at and above this dynamic pressure (atm)
+SET CC_AOA_Q_LO    TO 0.02.         // ... opening to AOA_TRIM_MAX by this one
+SET CC_DEAD_CONFIRM TO 4.           // consecutive no-thrust samples before the
+                                    // rocket phase calls the engine dead
+SET FEAS_ARM_DV    TO 350.          // rocket dV spent before the *whole-climb*
+                                    // efficiency figure is worth quoting (m/s)
 SET FEAS_CONFIRM   TO 4.            // consecutive infeasible samples to act on
+
+// --- Measured climb efficiency ----------------------------------------------
+//  The loss factor is measured over a *trailing window* of rocket dV, not
+//  cumulatively from the mode switch.  The distinction is the whole point: the
+//  first half-minute of a closed-cycle push happens at the bottom of the rocket
+//  climb, at the lowest TWR the ship will ever have and in the last of the air,
+//  and it is genuinely awful - the reference flight measured x6.37 there.  Half
+//  a minute later, at 31 km with a lighter ship, the same measurement reads
+//  x1.3.  A cumulative average is dominated by the bad part for the whole burn,
+//  and pricing the *remaining* vacuum climb at it condemns orbits that are
+//  comfortably in reach.  A window answers the question that actually matters:
+//  what is a m/s buying right now?
+//  The window figure is used raw, with no smoothing on top.  120 m/s of burn is
+//  already a fifteen-to-twenty-second average, not a noisy instant, and a filter
+//  over it would only add lag - in the wrong direction, because climb efficiency
+//  improves monotonically as the air thins and the ship lightens.  A lagging
+//  figure is a systematically over-priced one, which is the failure being fixed.
+SET EFF_WINDOW_DV  TO 120.          // rocket dV per efficiency window (m/s)
+SET EFF_MIN_WINDOWS TO 2.           // windows needed before the terminal "cannot
+                                    // reach orbit" verdict may be pronounced
+SET EFF_VERDICT_P  TO 0.005.        // ...and the ambient pressure it may be
+                                    // pronounced below, as a fraction of the
+                                    // body's sea-level pressure.  Above this the
+                                    // ship is still in the drag layer, where the
+                                    // measurement is real but says nothing about
+                                    // the vacuum climb it would be charged to.
+SET EFF_RESUME_DV  TO 25.           // dV in hand, over the bill, before a flat
+                                    // burn is allowed to resume climbing (m/s)
 
 // --- Coast / circularisation ------------------------------------------------
 SET USE_WARP    TO TRUE.            // time-warp the coast to apoapsis
@@ -700,10 +761,33 @@ FUNCTION deorbitDvFrom {
   RETURN MAX(0, vCircAt(apAlt) - SQRT(BODY_MU * (2 / rA - 1 / smaT))).
 }
 
+// A dV figure quoted for the *light* ship, converted into what it costs on the
+// gauge here, with the cargo still aboard.
+//
+// Every dV number in this script is a reading on the ship as it is now.  The
+// deorbit burn is not: it happens after the payload is released, on a ship that
+// can be half the mass, where the same tonnes of propellant are worth far more.
+// Reserving the post-release figure against the pre-release gauge sets aside
+// roughly twice the propellant the burn will actually use, and on a 27% payload
+// fraction that is enough to price a reachable orbit out of reach.  The
+// reference flight is the proof: it reached orbit holding 54 m/s - under the
+// 158 m/s reserve this script demands - released 72 t of payload, found itself
+// holding 103 m/s, and deorbited on it comfortably.
+FUNCTION heavyEquivalentOf {
+  PARAMETER dvLight.
+  IF NOT DEPLOY_BEFORE_DEORBIT OR payloadMass <= 1 { RETURN dvLight. }
+  LOCAL vEx IS RKT_ISP * G0.
+  LOCAL mLight IS SHIP:MASS - payloadMass.
+  IF mLight <= 0 OR vEx <= 0 { RETURN dvLight. }
+  LOCAL prop IS mLight * (1 - CONSTANT:E ^ (-dvLight / vEx)).
+  IF prop <= 0 OR SHIP:MASS <= prop { RETURN dvLight. }
+  RETURN MIN(dvLight, vEx * LN(SHIP:MASS / (SHIP:MASS - prop))).
+}
+
 // What must still be in the tanks *after* we are circular at apAlt.
 FUNCTION reserveDvFor {
   PARAMETER apAlt.
-  RETURN deorbitDvFrom(apAlt) + DV_MARGIN.
+  RETURN heavyEquivalentOf(deorbitDvFrom(apAlt) + DV_MARGIN).
 }
 
 // Impulsive estimate of the dV still needed to raise apoapsis to apAlt from
@@ -794,6 +878,34 @@ FUNCTION affordableAp {
   RETURN lo.
 }
 
+// May the rocket phase pronounce the mission dead?  Re-targeting downward is
+// cheap and reversible, so it is always allowed; declaring that no orbit at all
+// is reachable is neither, and it needs evidence that is worth something.
+//
+// Two conditions, and the reference flight failed both.  First, enough windows
+// to know the measurement is not a transient.  Second - the one that matters -
+// the ship must be clear of the drag layer.  A loss factor measured at 29 km is
+// a true statement about 29 km and a worthless one about the 50 km of vacuum
+// climb it would be charged to: the reference flight measured x6.37 down there,
+// priced a 78 km apoapsis at 4869 m/s of climb against 1121 m/s in the tanks,
+// and levelled off - while flying at 9.4 m/s^2 out of the 10.3 its engines
+// could produce, which is a loss factor of x1.1.  The orbit it had just written
+// off was affordable.  So the verdict waits until the air is thin enough that
+// what is being measured is what is about to be flown.
+//
+// The exception is a ship that is spending dV and buying nothing at all, window
+// after window: sustained, that is not a regime artefact at any altitude, and
+// there is nothing to be learned by climbing further to confirm it.  It has to
+// be sustained, though.  The single window straight after the handover reads the
+// ceiling on almost every spaceplane - the jets have just cut, the rocket is
+// still spooling, and the ship is briefly *losing* speed - and treating that one
+// sample as proof would reintroduce the very abort this gate exists to prevent.
+FUNCTION verdictAllowed {
+  IF effWindows < EFF_MIN_WINDOWS { RETURN FALSE. }
+  IF deadWindows >= EFF_MIN_WINDOWS { RETURN TRUE. }
+  RETURN atmPressureAt(SHIP:ALTITUDE) <= EFF_VERDICT_P * atmPressureAt(0).
+}
+
 // ---------------------------------------------------------------------------
 //  Pre-flight feasibility  --  can this ship afford the mission at all?
 // ---------------------------------------------------------------------------
@@ -865,6 +977,32 @@ FUNCTION dvHandoverSplit {
 FUNCTION dvAtHandover {             // ... adding a balanced LF/Ox load
   PARAMETER addProp, addDry.
   RETURN dvHandoverSplit(addProp * LF_FRAC, addProp * OX_FRAC, addDry).
+}
+
+// Rocket dV at the handover if the payload's tanks were counted as ours.  This
+// is not an upgrade, so it does not go through dvHandoverSplit: the propellant
+// and the tank holding it are already aboard and already being lifted, and
+// nothing is being added to the ship.  Only the pool the engines are allowed to
+// drink from changes.
+//
+// It is worth printing because it is the single largest number in the whole
+// budget, and because it is the difference between two flights of this airframe
+// that read as contradictions.  The PR #2 autopilot had no payload isolation and
+// reached 104 x 99 km; roughly a third of everything it burned came out of the
+// cargo tanks.  Whether that is a success or a theft is a question about the
+// mission, not about the ascent, so the script states the number and leaves the
+// decision to ISOLATE_PAYLOAD.
+FUNCTION dvHandoverWithPayloadFuel {
+  IF PAY_TANKS:LENGTH = 0 { RETURN 0. }
+  LOCAL mH IS handoverMass(0, 0, 0).
+  LOCAL lfLeft IS lfMass0 + listResAmt(PAY_TANKS, "LiquidFuel") * LF_DENS -
+                  jetBurnWith(0, 0, 0).
+  LOCAL oxLeft IS oxMass0 + listResAmt(PAY_TANKS, "Oxidizer") * OX_DENS.
+  LOCAL lfUse IS MIN(lfLeft, oxLeft * LFO_LF_RATIO / LFO_OX_RATIO).
+  IF lfUse <= 0 { RETURN 0. }
+  LOCAL prop IS lfUse * (LFO_LF_RATIO + LFO_OX_RATIO) / LFO_LF_RATIO.
+  IF mH <= prop { RETURN 0. }
+  RETURN RKT_ISP * G0 * LN(mH / (mH - prop)).
 }
 
 // How much liquid fuel is left over once the oxidiser is fully paired off -
@@ -942,6 +1080,7 @@ FUNCTION twrAtHandover {
 //  has no thrust for) leaves the trim saturated and poisons the next phase.
 // ---------------------------------------------------------------------------
 SET aoaTrim TO 0.
+SET aoaCap  TO AOA_TRIM_MAX.        // rationed on Q once the rocket phase starts
 
 FUNCTION speedNow {
   IF SHIP:ALTITUDE > ATM_TOP { RETURN MAX(30, SHIP:VELOCITY:ORBIT:MAG). }
@@ -957,6 +1096,17 @@ FUNCTION fpaNow {
   RETURN ARCSIN(clampVal(SHIP:VERTICALSPEED / speedNow(), -0.95, 0.95)).
 }
 
+// How much angle of attack the flow may be charged for right now.  In the jet
+// phase this is the full trim authority and never binds - an air-breathing climb
+// holds its corridor at a few degrees.  In the rocket phase it is scheduled on
+// dynamic pressure, because that is what turns angle into drag.
+FUNCTION aoaLimitNow {
+  IF SHIP:Q >= CC_AOA_Q_HI { RETURN CC_AOA_HIQ. }
+  IF SHIP:Q <= CC_AOA_Q_LO { RETURN AOA_TRIM_MAX. }
+  RETURN CC_AOA_HIQ + (AOA_TRIM_MAX - CC_AOA_HIQ) *
+         (CC_AOA_Q_HI - SHIP:Q) / (CC_AOA_Q_HI - CC_AOA_Q_LO).
+}
+
 FUNCTION steerFpa {
   PARAMETER fpaWanted, pitchLo, pitchHi, dtStep.
   LOCAL err IS fpaWanted - fpaNow().
@@ -966,7 +1116,13 @@ FUNCTION steerFpa {
      (raw >= pitchHi AND err < 0) {
     SET aoaTrim TO clampVal(aoaTrim + AOA_KI * err * dtStep, -AOA_TRIM_MAX, AOA_TRIM_MAX).
   }
-  RETURN clampVal(fpaWanted + aoaTrim, pitchLo, pitchHi).
+  // Limit the angle the airframe actually presents to the flow, not the trim.
+  // They are not the same number: while the trim is winding up the flight path
+  // lags the command, and the real angle of attack is the trim *plus* that lag.
+  // The reference flight sat on a 14 deg trim clamp and flew at 16.4 deg.
+  LOCAL cmd IS clampVal(fpaWanted + aoaTrim,
+                        fpaNow() - aoaCap, fpaNow() + aoaCap).
+  RETURN clampVal(cmd, pitchLo, pitchHi).
 }
 
 // ---------------------------------------------------------------------------
@@ -1003,11 +1159,15 @@ FUNCTION anyFlameout {
 
 FUNCTION budgetLine {               // one-line dV status, used throughout
   PARAMETER apAlt, lossFactor.
+  LOCAL resNote IS "".
+  IF DEPLOY_BEFORE_DEORBIT AND payloadMass > 1 {
+    SET resNote TO "*".             // priced after the payload comes off
+  }
   RETURN "dV " + ROUND(rocketDv()) + " vs need " + ROUND(priceOfOrbit(apAlt, lossFactor)) +
          " (climb " + ROUND(dvToRaiseApTo(apAlt) * lossFactor) +
          " + circ " + ROUND(circDvAt(apAlt)) +
-         " + deorbit " + ROUND(deorbitDvFrom(apAlt)) +
-         " + margin " + ROUND(DV_MARGIN) + ") @ loss x" + ROUND(lossFactor, 2).
+         " + reserve " + ROUND(reserveDvFor(apAlt)) + resNote +
+         ") @ loss x" + ROUND(lossFactor, 2).
 }
 
 // ---------------------------------------------------------------------------
@@ -1298,6 +1458,24 @@ IF dvHandover >= dvRequired {
     PRINT "   * PAYLOAD: even flying empty would not close the gap.".
   }
 
+  // --- or stop treating the payload's propellant as cargo --------------------
+  //  Almost always the biggest single number on this list, because the payload
+  //  tanks on a tanker are most of the propellant aboard.  It is offered last
+  //  and never taken automatically: the script cannot know whether that fuel is
+  //  meant to arrive in orbit or is simply fuel.
+  IF PAY_TANKS:LENGTH > 0 AND ISOLATE_PAYLOAD {
+    LOCAL dvUnlocked IS dvHandoverWithPayloadFuel().
+    IF dvUnlocked > dvHandover + 1 {
+      PRINT "   * PAYLOAD FUEL: the cargo tanks hold " +
+            ROUND(listResAmt(PAY_TANKS, "LiquidFuel")) + " LF / " +
+            ROUND(listResAmt(PAY_TANKS, "Oxidizer")) + " Ox, locked out as cargo.".
+      PRINT "     Counting them would put " + ROUND(dvUnlocked) +
+            " m/s at the handover instead of " + ROUND(dvHandover) + ".".
+      PRINT "     SET ISOLATE_PAYLOAD TO FALSE. only if that fuel is propellant".
+      PRINT "     and not deliverable cargo - the engines will drink it.".
+    }
+  }
+
   // --- or accept a lower orbit ----------------------------------------------
   PRINT "   * ORBIT: lower REQUESTED_APOAPSIS, or raise PLAN_SWITCH_SPD if this".
   PRINT "     airframe really does hand over faster than " + ROUND(PLAN_SWITCH_SPD) + " m/s.".
@@ -1543,8 +1721,25 @@ SET dvAtSwitch  TO rocketDv().
 // affordable again, and the decision would oscillate.
 SET EFF_REF_AP  TO REQUESTED_APOAPSIS.
 SET price0      TO dvToRaiseApTo(EFF_REF_AP).
+// Two efficiency figures, because two different questions are being asked.
+// lossFactor is the trailing-window one and prices the climb that is *left* -
+// it is what every in-flight decision is made on.  lossWhole is cumulative from
+// the switch and describes the climb as a whole, which is the number the next
+// pre-flight check should be planned with; quoting the window figure there
+// would tell the next flight the ascent is cheaper than it is.
+SET lossWhole   TO CLIMB_LOSS_FACTOR.
+SET wholeMeasured TO FALSE.
+SET effMarkDv    TO dvAtSwitch.     // dV reading at the head of the live window
+SET effMarkPrice TO price0.         // ...and the reference price there
+SET effWindows   TO 0.              // completed windows so far
+SET deadWindows  TO 0.              // ...of which consecutive ones bought nothing
 
 PRINT "Closed cycle. " + budgetLine(targetAp, lossFactor).
+IF DEPLOY_BEFORE_DEORBIT AND payloadMass > 1 {
+  PRINT "  (reserve* = deorbit " + ROUND(deorbitDvFrom(targetAp)) + " + margin " +
+        ROUND(DV_MARGIN) + " flown after " + ROUND(payloadMass, 1) +
+        " t of payload comes off.)".
+}
 PRINT "  Mass " + ROUND(SHIP:MASS, 1) + " t, thrust " + ROUND(SHIP:AVAILABLETHRUST) +
       " kN, TWR " + ROUND(twrNow(), 2) + ", Isp " + ROUND(RKT_ISP) + " s.".
 
@@ -1566,6 +1761,7 @@ PRINT "  Initial climb command " + ROUND(ccFpaHi, 1) + " deg, flattening to " +
       ROUND(CC_FPA_FLAT, 1) + " deg by " + ROUND(CC_FLAT_ALT / 1000) + " km.".
 
 SET aoaTrim   TO 0.                 // fresh trim: different regime, different AoA
+SET aoaCap    TO aoaLimitNow().
 SET fpaBias   TO 0.
 SET emergency TO FALSE.             // orbit priced out: fly for periapsis instead
 SET lastLoopT TO TIME:SECONDS.
@@ -1577,6 +1773,8 @@ SET reportT   TO TIME:SECONDS.
 SET settled   TO FALSE.
 SET infeasVotes TO 0.
 SET infeasWarned TO FALSE.
+SET infeasNoted TO FALSE.
+SET deadVotes TO 0.
 SET ccDone    TO FALSE.
 SET stopReason TO "apoapsis reached".
 
@@ -1639,17 +1837,72 @@ UNTIL ccDone {
   //  the one place a time is used, and it is the smooth vs/g_eff estimate, not
   //  ETA:APOAPSIS - and g_eff is gravity net of centrifugal relief, which at
   //  1800 m/s is over half of it.
-  LOCAL tapShort IS CC_TAP_MIN - apexTimeEst().
-  IF tapShort > 0 {
-    SET fpaWant TO fpaWant + clampVal(CC_TAP_GAIN * tapShort, 0, CC_TAP_MAX_ADD).
+  //
+  //  It is skipped in the emergency flat burn, where it is exactly backwards.
+  //  Once apoapsis has stopped being the objective, arriving at the apex is not
+  //  a failure - it is the plan, and flying through it flat is how periapsis
+  //  gets bought.  Applied there it also runs away: the flatter the ship flies
+  //  the sooner the apex arrives, so the floor demands more climb, which is the
+  //  one thing the emergency exists to stop.  On the reference flight it drove
+  //  the commanded angle from the 2 deg the emergency had just set to 10.5 deg,
+  //  and the pitch command to +24 deg, in a burn whose stated objective was to
+  //  stop buying altitude.
+  IF NOT emergency {
+    LOCAL tapShort IS CC_TAP_MIN - apexTimeEst().
+    IF tapShort > 0 {
+      SET fpaWant TO fpaWant + clampVal(CC_TAP_GAIN * tapShort, 0, CC_TAP_MAX_ADD).
+    }
   }
 
+  SET aoaCap TO aoaLimitNow().
   SET pitchCmd TO steerFpa(fpaWant, CC_PITCH_MIN, CC_PITCH_MAX, dtStep).
 
   // ---- dV policing --------------------------------------------------------
   IF nowT - lastPolT >= CC_POLICE_DT {
     SET lastPolT TO nowT.
     LOCAL dvNow IS rocketDv().
+
+    // Floor 0: the engine has stopped.  rocketDv() prices the propellant in our
+    // tanks; it cannot tell whether the engines can still reach it.  When they
+    // cannot, every exit below is unreachable - apoapsis stops rising, so the
+    // target is never met, and the dV reading freezes, so the glide reserve is
+    // never crossed - and this loop spins at full throttle while the ship coasts
+    // over the top and falls back into the air, with the ascent autopilot still
+    // holding the controls and the reentry script never run.  The jet phase has
+    // guarded exactly this since it was written; the rocket phase had no guard
+    // at all.  Total loss only: a single flamed-out RAPIER out of fourteen is
+    // not a reason to end a climb the other thirteen are still flying.
+    IF SHIP:AVAILABLETHRUST < 1 {
+      SET deadVotes TO deadVotes + 1.
+      IF deadVotes >= CC_DEAD_CONFIRM {
+        SET settled TO TRUE.
+        SET stopReason TO "thrust lost with " + ROUND(dvNow) + " m/s still on the gauge".
+        SET targetAp TO SHIP:APOAPSIS.
+        SET ccDone TO TRUE.
+        PRINT "======================================================".
+        PRINT "!! THRUST LOST at " + ROUND(SHIP:ALTITUDE / 1000, 1) + " km with the".
+        PRINT "   throttle open. Ending the climb here so the ship is flown".
+        PRINT "   rather than left to fall under an autopilot that is still".
+        PRINT "   commanding a burn.".
+        IF dvNow > DV_GLIDE_RESERVE {
+          PRINT "   The tanks still price " + ROUND(dvNow) + " m/s, so this is a feed".
+          PRINT "   or ignition fault, not an empty ship:".
+          PRINT "     core LF " + ROUND(coreResAmt("LiquidFuel")) + " / Ox " +
+                ROUND(coreResAmt("Oxidizer")) + "  (burned as " + ROUND(LFO_LF_RATIO) +
+                ":" + ROUND(LFO_OX_RATIO) + " pairs)".
+          IF anyFlameout() { PRINT "     at least one engine reports FLAMEOUT.". }
+          IF PAY_TANKS:LENGTH > 0 {
+            PRINT "     payload tanks (locked out) hold LF " +
+                  ROUND(listResAmt(PAY_TANKS, "LiquidFuel")) + " / Ox " +
+                  ROUND(listResAmt(PAY_TANKS, "Oxidizer")) + ".".
+          }
+        }
+        PRINT "======================================================".
+        BREAK.
+      }
+    } ELSE {
+      SET deadVotes TO 0.
+    }
 
     // Floor 1: an orbit is genuinely in reach, so the deorbit money is real
     // money.  Stop climbing and bank the orbit we can still pay to leave.
@@ -1700,24 +1953,66 @@ UNTIL ccDone {
     // ---- measured climb efficiency ----------------------------------------
     //  The impulsive estimate is always optimistic; how optimistic depends on
     //  drag, TWR and the profile, i.e. on the ship.  So measure it: how much of
-    //  the bill did the dV we have already spent actually pay off?  That ratio
-    //  re-prices the rest of the climb, and it is the number the settle
-    //  decision is made on.
+    //  the bill did the dV we have spent actually pay off?  That ratio re-prices
+    //  the rest of the climb, and it is the number the settle decision is made
+    //  on - which is why it is measured over a window rather than cumulatively.
+    //  How lossy the climb *has been* is a fact about a burn that is over.  What
+    //  the settle decision needs is how lossy it is *now*, because that is what
+    //  the m/s still in the tanks are going to be spent at.
     LOCAL spent IS dvAtSwitch - dvNow.
-    IF spent > FEAS_ARM_DV {
-      LOCAL priceNow IS dvToRaiseApTo(EFF_REF_AP).
-      LOCAL paid IS price0 - priceNow.
-      IF paid > 1 {
-        SET lossFactor TO clampVal(spent / paid, 1, 12).
-      } ELSE {
-        SET lossFactor TO 12.       // spending dV and buying nothing
-      }
-      SET lossMeasured TO TRUE.
+    LOCAL priceNow IS dvToRaiseApTo(EFF_REF_AP).
 
+    //  The whole-climb figure, cumulative from the switch.  Nothing in flight is
+    //  decided on it - it exists so the post-flight advice can tell the next
+    //  pre-flight check what this ascent really cost, end to end.
+    IF spent > FEAS_ARM_DV {
+      LOCAL paidAll IS price0 - priceNow.
+      IF paidAll > 1 {
+        SET lossWhole TO clampVal(spent / paidAll, 1, 12).
+      } ELSE {
+        SET lossWhole TO 12.
+      }
+      SET wholeMeasured TO TRUE.
+    }
+
+    //  The live figure, over a trailing window.  Each completed window rolls the
+    //  head forward, so what comes out is the efficiency of the last
+    //  EFF_WINDOW_DV m/s rather than an average dragged down by the worst part
+    //  of the burn, which is always the first part.
+    LOCAL spentWin IS effMarkDv - dvNow.
+    IF spentWin >= EFF_WINDOW_DV {
+      LOCAL paidWin IS effMarkPrice - priceNow.
+      LOCAL winLoss IS 12.          // spending dV and buying nothing
+      IF paidWin > 1 { SET winLoss TO clampVal(spentWin / paidWin, 1, 12). }
+      SET lossFactor TO winLoss.
+      IF winLoss >= 12 { SET deadWindows TO deadWindows + 1. }
+      ELSE { SET deadWindows TO 0. }
+      SET effWindows   TO effWindows + 1.
+      SET effMarkDv    TO dvNow.
+      SET effMarkPrice TO priceNow.
+      SET lossMeasured TO TRUE.
+    }
+
+    IF lossMeasured {
       IF dvNow < priceOfOrbit(targetAp, lossFactor) {
         SET infeasVotes TO infeasVotes + 1.
       } ELSE {
         SET infeasVotes TO 0.
+      }
+
+      //  The verdict is not a one-way door.  A flat burn entered on a reading
+      //  taken in the drag layer must be allowed to end when the air thins and
+      //  the reading improves; latching it means no later evidence, however
+      //  good, can ever restore the climb.  Requiring the orbit to clear the
+      //  bill by EFF_RESUME_DV keeps it from chattering across the boundary.
+      IF emergency AND
+         priceOfOrbit(MIN_ORBIT_ALT, lossFactor) + EFF_RESUME_DV <= dvNow {
+        SET emergency TO FALSE.
+        SET infeasWarned TO FALSE.
+        SET infeasVotes TO 0.
+        PRINT "  Orbit back in budget at the measured x" + ROUND(lossFactor, 2) +
+              " - resuming the climb.".
+        PRINT "  " + budgetLine(MIN_ORBIT_ALT, lossFactor).
       }
 
       IF infeasVotes >= FEAS_CONFIRM {
@@ -1729,7 +2024,7 @@ UNTIL ccDone {
           PRINT "  " + budgetLine(targetAp, lossFactor).
           SET targetAp TO bestAp.
           SET settled TO TRUE.
-        } ELSE IF bestAp = 0 {
+        } ELSE IF bestAp = 0 AND verdictAllowed() {
           IF NOT infeasWarned {
             PRINT "======================================================".
             PRINT "!! CANNOT REACH ORBIT. Even a " + ROUND(MIN_ORBIT_ALT / 1000, 1) +
@@ -1757,6 +2052,13 @@ UNTIL ccDone {
             SET ccDone TO TRUE.
             BREAK.
           }
+        } ELSE IF bestAp = 0 AND NOT infeasNoted {
+          // Priced out on a reading taken too low to mean anything yet.  Say so
+          // once, keep climbing, and let the thinner air answer the question.
+          PRINT "  Priced out at x" + ROUND(lossFactor, 2) + ", but still in the".
+          PRINT "  drag layer at " + ROUND(SHIP:ALTITUDE / 1000, 1) +
+                " km - climbing on before calling it.".
+          SET infeasNoted TO TRUE.
         }
       }
     }
@@ -1770,6 +2072,16 @@ UNTIL ccDone {
     PRINT "      fpa " + ROUND(fpaNow(), 1) + "/" + ROUND(fpaWant, 1) + " | pitch " +
           ROUND(pitchCmd, 1) + " | acc " + ROUND(accelNow, 2) + " | TWR " +
           ROUND(twrNow(), 2) + " | dV " + ROUND(rocketDv()).
+    // AoA and the drag it is buying, because this is where the climb is won or
+    // lost and neither was visible on the flight that spent 330 m/s to buy 40.
+    PRINT "      AoA " + ROUND(pitchCmd - fpaNow(), 1) + "/" + ROUND(aoaCap, 1) +
+          " | Q " + ROUND(SHIP:Q, 3) + " | drag " + ROUND(dragNow(accelNow)) + " kN".
+    // The loss factor every cycle, not only when it triggers a verdict.  On the
+    // reference flights the first anyone heard of it was the abort message.
+    IF lossMeasured {
+      PRINT "      loss x" + ROUND(lossFactor, 2) + " over the last " +
+            ROUND(EFF_WINDOW_DV) + " m/s (" + effWindows + " windows)".
+    }
     LOCAL flatNote IS "".
     IF emergency { SET flatNote TO " | FLAT-BURN (orbit priced out)". }
     PRINT "      PE " + ROUND(SHIP:PERIAPSIS / 1000, 1) + " km | apex in " +
@@ -1868,8 +2180,14 @@ IF NOT abortSuborbital {
   SET circPeTarget TO MIN(circPeTarget, orbitAlt - 500).
   PRINT "Circularising at " + ROUND(orbitAlt / 1000, 1) + " km; PE target " +
         ROUND(circPeTarget / 1000, 1) + " km.".
-  PRINT "  Protecting " + ROUND(reserveDvFor(orbitAlt)) + " m/s (deorbit " +
-        ROUND(deorbitDvFrom(orbitAlt)) + " + margin " + ROUND(DV_MARGIN) + ").".
+  IF DEPLOY_BEFORE_DEORBIT AND payloadMass > 1 {
+    PRINT "  Protecting " + ROUND(reserveDvFor(orbitAlt)) + " m/s here = deorbit " +
+          ROUND(deorbitDvFrom(orbitAlt)) + " + margin " + ROUND(DV_MARGIN) +
+          " once the payload is off.".
+  } ELSE {
+    PRINT "  Protecting " + ROUND(reserveDvFor(orbitAlt)) + " m/s (deorbit " +
+          ROUND(deorbitDvFrom(orbitAlt)) + " + margin " + ROUND(DV_MARGIN) + ").".
+  }
 
   SET dvCheckT    TO TIME:SECONDS.
   SET thrCmd TO 1.
@@ -1949,15 +2267,34 @@ PRINT "  Periapsis  : " + ROUND(SHIP:PERIAPSIS / 1000, 2) + " km".
 PRINT "  Inclination: " + ROUND(SHIP:ORBIT:INCLINATION, 2) + " deg".
 PRINT "  Mass       : " + ROUND(SHIP:MASS, 1) + " t  (burned " +
       ROUND(launchMass - SHIP:MASS, 1) + " t)".
-IF lossMeasured {
-  PRINT "  Climb loss : x" + ROUND(lossFactor, 2) + " vs the impulsive estimate".
+IF wholeMeasured {
+  PRINT "  Climb loss : x" + ROUND(lossWhole, 2) + " over the whole climb, x" +
+        ROUND(lossFactor, 2) + " at the end of it".
+} ELSE IF lossMeasured {
+  PRINT "  Climb loss : x" + ROUND(lossFactor, 2) + " over the last " +
+        ROUND(EFF_WINDOW_DV) + " m/s (too short a burn for a whole-climb figure)".
 } ELSE {
   PRINT "  Climb loss : not measured (rocket burn shorter than " +
-        ROUND(FEAS_ARM_DV) + " m/s)".
+        ROUND(EFF_WINDOW_DV) + " m/s)".
 }
 PRINT "  dV left    : " + ROUND(dvLeft) + " m/s  (our tanks only)".
 PRINT "  Deorbit    : " + ROUND(dvDeorb) + " m/s  ->  spare after deorbit " +
       ROUND(dvLeft - dvDeorb) + " m/s".
+// The same propellant, priced after the cargo is gone.  Every dV figure above is
+// computed at the ship's *current* mass, payload included, but the deorbit burn
+// happens after the payload is released - on a much lighter ship, where the same
+// tonnes in the tank are worth far more.  Budgeting the reserve at the heavy
+// mass is a real reserve the ship does not need to carry, and on a 27% payload
+// fraction it is most of the reserve.
+IF payloadMass > 1 AND rocketPropMass() > 0 {
+  LOCAL mLight IS SHIP:MASS - payloadMass.
+  IF mLight > rocketPropMass() {
+    LOCAL dvLight IS RKT_ISP * G0 * LN(mLight / (mLight - rocketPropMass())).
+    PRINT "  After release of " + ROUND(payloadMass, 1) + " t of payload the same".
+    PRINT "  propellant is worth " + ROUND(dvLight) + " m/s (x" +
+          ROUND(dvLight / MAX(1, dvLeft), 2) + ") - deploy before deorbiting.".
+  }
+}
 PRINT "  Fuel -- LF: " + ROUND(coreResAmt("LiquidFuel")) +
       " , Ox: " + ROUND(coreResAmt("Oxidizer")) +
       " , Mono: " + ROUND(resAmtShip("MonoPropellant")).
@@ -1965,14 +2302,29 @@ IF PAY_TANKS:LENGTH > 0 {
   PRINT "  Payload LF/Ox (locked out): " + ROUND(listResAmt(PAY_TANKS, "LiquidFuel")) +
         " / " + ROUND(listResAmt(PAY_TANKS, "Oxidizer")).
 }
+// Answer the funding question at the mass the burn will be flown at.  dvLeft is
+// a reading on the ship as it sits, cargo aboard; comparing it against a deorbit
+// figure that will be flown after release is what made the reference flight look
+// stranded at 54 m/s when it was holding enough for a comfortable deorbit.
 IF NOT inOrbit {
   PRINT "  No deorbit burn required - the trajectory already reenters.".
-} ELSE IF dvLeft >= dvDeorb + DV_MARGIN {
-  PRINT "  DEORBIT FUNDED - RUN deorbit_land. when you are ready.".
-} ELSE IF dvLeft >= dvDeorb {
-  PRINT "  Deorbit funded but with no margin - deorbit promptly.".
 } ELSE {
-  PRINT "  !! DEORBIT NOT FUNDED - refuel, or lower PE on RCS monopropellant.".
+  LOCAL needFunded IS heavyEquivalentOf(dvDeorb + DV_MARGIN).
+  LOCAL needBare   IS heavyEquivalentOf(dvDeorb).
+  IF DEPLOY_BEFORE_DEORBIT AND payloadMass > 1 {
+    PRINT "  Deorbit costs " + ROUND(needBare) + " m/s of what is on the gauge now" +
+          " (" + ROUND(dvDeorb) + " m/s after release).".
+  }
+  IF dvLeft >= needFunded {
+    PRINT "  DEORBIT FUNDED - RUN deorbit_land. when you are ready.".
+  } ELSE IF dvLeft >= needBare {
+    PRINT "  Deorbit funded but with no margin - deorbit promptly.".
+  } ELSE {
+    PRINT "  !! DEORBIT NOT FUNDED - refuel, or lower PE on RCS monopropellant.".
+  }
+  IF DEPLOY_BEFORE_DEORBIT AND payloadMass > 1 {
+    PRINT "  RELEASE THE PAYLOAD FIRST - that is what these numbers assume.".
+  }
 }
 PRINT "======================================================".
 PRINT "Autopilot complete. Ship handed back to pilot (SAS on).".
@@ -2006,11 +2358,15 @@ IF jetLfUsed > 0 {
   PRINT "    SET PLAN_SWITCH_SPD  TO " + ROUND(swSpeed / 10) * 10 + ".".
   PRINT "    SET PLAN_JET_DV      TO " + ROUND(jetDvReal / 10) * 10 +
         ".   // was " + ROUND(planJetDv).
-  IF lossMeasured {
-    PRINT "    SET PLAN_LOSS_FACTOR TO " + ROUND(lossFactor, 2) + ".".
+  IF wholeMeasured {
+    // The *whole-climb* figure, not the trailing window.  PLAN_LOSS_FACTOR
+    // prices a climb that starts at the handover, so it has to include the
+    // expensive bottom of it; the window figure describes the cheap end and
+    // would tell the next pre-flight check the ascent costs less than it does.
+    PRINT "    SET PLAN_LOSS_FACTOR TO " + ROUND(lossWhole, 2) + ".".
   } ELSE {
-    // The efficiency yardstick only arms after FEAS_ARM_DV of rocket burn.  A
-    // short push never armed it, so lossFactor is still the default it was
+    // The whole-climb yardstick only arms after FEAS_ARM_DV of rocket burn.  A
+    // short push never armed it, so lossWhole is still the default it was
     // seeded with - quoting that back as a measurement would be a lie.
     PRINT "    (climb losses not measured - the rocket burn was under " +
           ROUND(FEAS_ARM_DV) + " m/s, so PLAN_LOSS_FACTOR is unchanged.)".
@@ -2022,7 +2378,7 @@ IF jetLfUsed > 0 {
   // they are properties of the design, which is what we are advising on.
   SET JET_FRAC   TO jetLfUsed / MAX(0.001, launchMass).
   SET planSwSpd  TO swSpeed + ROT_BONUS.
-  SET dvRequired TO priceFromHandover(REQUESTED_APOAPSIS, swAlt, planSwSpd, lossFactor).
+  SET dvRequired TO priceFromHandover(REQUESTED_APOAPSIS, swAlt, planSwSpd, lossWhole).
   SET dvHandover TO dvAtHandover(0, 0).
 
   PRINT "  For a " + ROUND(REQUESTED_APOAPSIS / 1000) + " km orbit with deorbit fuel," +
@@ -2055,14 +2411,14 @@ IF jetLfUsed > 0 {
       PRINT "     * or fly " + ROUND(fixCut, 1) + " t lighter (of " +
             ROUND(payloadMass, 1) + " t of payload aboard).".
     }
-    SET affordAp TO affordableApFrom(dvHandover, swAlt, planSwSpd, lossFactor).
+    SET affordAp TO affordableApFrom(dvHandover, swAlt, planSwSpd, lossWhole).
     IF affordAp > 0 AND affordAp < REQUESTED_APOAPSIS {
       PRINT "     * or set REQUESTED_APOAPSIS TO " + ROUND(affordAp / 1000) * 1000 +
             ". - that orbit this ship can already afford.".
     }
   }
-  IF lossMeasured AND lossFactor > 2 {
-    PRINT "  !! Climb losses of x" + ROUND(lossFactor, 2) + " are TWR-bound, not".
+  IF wholeMeasured AND lossWhole > 2 {
+    PRINT "  !! Climb losses of x" + ROUND(lossWhole, 2) + " are TWR-bound, not".
     PRINT "     guidance-bound. Closed-cycle TWR was " + ROUND(twrAtSwitch, 2) +
           " at the handover; another".
     PRINT "     engine buys more than any profile change can.".
