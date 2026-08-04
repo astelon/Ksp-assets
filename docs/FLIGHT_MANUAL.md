@@ -153,6 +153,22 @@ below that a glide reserve (`DV_GLIDE_RESERVE`, 120 m/s) is kept back no matter
 what. The circularisation burn stops dead on the deorbit reserve rather than
 spending it — you may end up slightly elliptical, but always able to come home.
 
+**And it never burns long.** The circularisation is flown against the velocity
+error — the difference between the circular velocity where the ship is and the
+velocity it has — not against a periapsis reading taken from a target that may
+have moved. It aims along that error, so it can pitch up to arrest the descent a
+finite burn always picks up, and it stops the moment the error stops shrinking:
+past the circular point every further m/s goes into *apoapsis*, and that is a
+burn making the orbit worse. See `docs/CIRCULARISE_REVIEW.md` for the flight
+that went to 431 × 82 km without it.
+
+**The apoapsis is held through the last of the air.** MECO fires on an apoapsis
+reading taken at ~30 km at orbital speed, and the climb out to the vacuum costs
+some of it back — 3.7 km on the reference 85 km flight. Apoapsis can only be
+bought from below it, so `COAST_TRIM` pulses a quarter throttle against any sag
+on the way up, spending only what is not already promised to the circularisation
+and the deorbit. Set it `FALSE` to accept whatever the coast delivers.
+
 If the ship is so short of ΔV that the apoapsis never clears the atmosphere, the
 script says so, skips circularisation, and hands back a glider with fuel still in
 the tanks — no deorbit burn is needed from there.

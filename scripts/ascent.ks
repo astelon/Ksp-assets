@@ -80,8 +80,10 @@
 //    1. Runway roll : hold heading, rotate at ROTATE_SPEED.
 //    2. Air-breathing climb: self-tuning dynamic-pressure corridor.
 //    3. Closed-cycle push  : flight-path-angle schedule, measured dV policing.
-//    4. Coast       : throttle 0, warp to the circularisation burn.
-//    5. Circularise : burn prograde at apoapsis, stop at the deorbit reserve.
+//    4. Coast       : hold the apoapsis through the last of the air, then warp
+//                     to the circularisation burn.
+//    5. Circularise : fly the velocity error at apoapsis; stop when it stops
+//                     shrinking, at the target, or at the deorbit reserve.
 //    6. Report      : final orbit, dV left, deorbit funding check.
 //    7. Post-flight : re-price the mission from what the ship actually did and
 //                     say what the airframe needs changing.
@@ -151,18 +153,23 @@ SET PLAN_JET_DV_K    TO 2.2.        // jet dV per m/s of handover speed at TWR
                                     // 0.5; a draggy, slow-accelerating airframe
                                     // spends far longer fighting drag, so the
                                     // multiplier falls as take-off TWR rises
-SET PLAN_LOSS_FACTOR TO 1.65.       // gravity/drag/steering losses, rocket climb.
+SET PLAN_LOSS_FACTOR TO 1.36.       // gravity/drag/steering losses, rocket climb.
                                     // This prices the climb *from the handover*,
                                     // so it has to include the opening, which is
-                                    // where nearly all of it is spent: the
-                                    // reference flight burned 330 of its 1499 m/s
-                                    // in the first 31 s at 12% efficiency and
-                                    // flew the remaining 1115 at x1.31.  End to
-                                    // end that is x1.66, and it is the end-to-end
-                                    // number this constant wants.  Do not set it
-                                    // from the in-flight window figure - that one
-                                    // describes the cheap end of the climb and is
-                                    // a different question.  See
+                                    // where nearly all of it is spent.  It is the
+                                    // whole-climb figure the script prints as
+                                    // "over the whole climb" at the end of a
+                                    // flight - never the trailing-window one,
+                                    // which describes the cheap end of the climb
+                                    // and is a different question.
+                                    // 1.65 came from a flight flown before the
+                                    // AoA cap, which bought its apoapsis at 6-16
+                                    // deg of body drag.  The 85 km flight of the
+                                    // same airframe with the cap in measured
+                                    // x1.36 end to end and reached orbit with
+                                    // fuel to spare, so the old number now
+                                    // over-states this ascent by ~250 m/s and
+                                    // writes off orbits the ship can fly.  See
                                     // docs/CLIMB_LOSS_REVIEW.md.
 SET PLAN_TWR_MIN     TO 1.05.       // closed-cycle TWR wanted at the handover
 SET PLAN_JET_ISP     TO 3200.       // air-breathing Isp if it cannot be read (s)
@@ -353,6 +360,47 @@ SET USE_WARP    TO TRUE.            // time-warp the coast to apoapsis
 SET WARP_LEAD   TO 25.              // drop out of warp this long before the burn (s)
 SET CIRC_PE_TOL TO 1500.            // accept periapsis this far under apoapsis (m)
 SET PE_SAFETY   TO 8000.            // keep periapsis this far above the atmosphere (m)
+
+//  The coast out of the atmosphere is not free.  MECO is called on an apoapsis
+//  reading taken at 30 km at orbital speed, and the air between there and
+//  ATM_TOP goes on taking it back: the 85 km flight cut at 85.3 km and reached
+//  vacuum with 81.6.  Apoapsis can only be bought from below it, so this is the
+//  last chance to hold on to it, and it is a cheap one - a quarter throttle
+//  pulsed against the deficit, spent only while the orbit and the deorbit are
+//  still fully funded without it.  FALSE flies the old profile and accepts
+//  whatever apoapsis the coast delivers.
+SET COAST_TRIM     TO TRUE.
+SET COAST_TRIM_TOL TO 250.          // let apoapsis sag this far before trimming (m)
+SET COAST_TRIM_THR TO 0.25.         // throttle used to hold it
+
+//  The circularisation burn is flown against the velocity it is trying to
+//  reach, not against a periapsis reading.  The distinction is the difference
+//  between a 9 s burn and a runaway.  A finite burn does not happen at a point:
+//  the ship drifts past apoapsis while it is thrusting and starts falling, and
+//  every m/s of that descent is eccentricity that pure prograde thrust cannot
+//  take back out.  Periapsis then saturates a few km under the target - which
+//  a "burn until periapsis reaches X" loop cannot ever satisfy, so it keeps
+//  thrusting, and everything after the circular point goes into *apoapsis*.
+//  The 85 km flight that prompted this spent 360 m/s on a 163 m/s burn, ended
+//  at 431 x 82 km, and blamed the deorbit reserve for stopping it.
+//
+//  So: measure what is left to do as a vector - the circular velocity here
+//  minus the velocity we have - burn along it, and stop when it stops getting
+//  smaller.  That figure includes the descent, so it is honest about a burn
+//  that started late, and it turns over the moment the ship is faster than
+//  circular, which is the only overshoot guard that cannot be argued with.
+SET CIRC_DV_TOL    TO 1.5.          // remaining circularisation dV that is "done" (m/s)
+SET CIRC_GIVEUP_DV TO 3.            // ... and how far it may climb back off its
+                                    // own best before the burn is called over
+SET CIRC_AP_TOL    TO 5000.         // backstop: apoapsis this far over the target
+                                    // ends the burn whatever else is true (m)
+SET CIRC_TAPER_T   TO 2.            // throttle down over the last this much burn (s)
+SET CIRC_THR_MIN   TO 0.05.         // ... never below this throttle
+SET CIRC_AIM_MIN   TO 4.            // below this remaining dV the aim is frozen:
+                                    // it is a small difference of two big
+                                    // vectors and the direction goes to noise
+SET CIRC_ARM_T     TO 3.            // let the steering settle this long before the
+                                    // give-up test is allowed to fire (s)
 
 // ---------------------------------------------------------------------------
 //  Body / physical constants (cached once)
@@ -751,6 +799,20 @@ FUNCTION circDvAt {
   RETURN MAX(0, vCircAt(apAlt) - vAp).
 }
 
+// The velocity change that would circularise the orbit *here*, as a vector.
+// Everything the circularisation burn needs to know is in it: how much speed is
+// missing, and how much of the descent the ship has picked up since apoapsis has
+// to be cancelled.  That second part is what a prograde-only burn can never fix
+// - radial velocity is eccentricity, and burning prograde with the nose on a
+// falling velocity vector adds to it rather than taking it out.
+FUNCTION circBurnVec {
+  LOCAL rHat IS SHIP:UP:VECTOR.               // straight up from the body centre
+  LOCAL vNow IS SHIP:VELOCITY:ORBIT.
+  LOCAL vHor IS VXCL(rHat, vNow).             // the part that is actually orbiting
+  IF vHor:MAG < 1 { RETURN V(0, 0, 0). }
+  RETURN vHor:NORMALIZED * vCircAt(SHIP:ALTITUDE) - vNow.
+}
+
 // dV to drop periapsis to DEORBIT_PE from a circular orbit at apAlt.
 FUNCTION deorbitDvFrom {
   PARAMETER apAlt.
@@ -773,15 +835,20 @@ FUNCTION deorbitDvFrom {
 // reference flight is the proof: it reached orbit holding 54 m/s - under the
 // 158 m/s reserve this script demands - released 72 t of payload, found itself
 // holding 103 m/s, and deorbited on it comfortably.
-FUNCTION heavyEquivalentOf {
-  PARAMETER dvLight.
+FUNCTION heavyEquivalentAt {
+  PARAMETER dvLight, mHeavy.
   IF NOT DEPLOY_BEFORE_DEORBIT OR payloadMass <= 1 { RETURN dvLight. }
   LOCAL vEx IS RKT_ISP * G0.
-  LOCAL mLight IS SHIP:MASS - payloadMass.
+  LOCAL mLight IS mHeavy - payloadMass.
   IF mLight <= 0 OR vEx <= 0 { RETURN dvLight. }
   LOCAL prop IS mLight * (1 - CONSTANT:E ^ (-dvLight / vEx)).
-  IF prop <= 0 OR SHIP:MASS <= prop { RETURN dvLight. }
-  RETURN MIN(dvLight, vEx * LN(SHIP:MASS / (SHIP:MASS - prop))).
+  IF prop <= 0 OR mHeavy <= prop { RETURN dvLight. }
+  RETURN MIN(dvLight, vEx * LN(mHeavy / (mHeavy - prop))).
+}
+
+FUNCTION heavyEquivalentOf {
+  PARAMETER dvLight.
+  RETURN heavyEquivalentAt(dvLight, SHIP:MASS).
 }
 
 // What must still be in the tanks *after* we are circular at apAlt.
@@ -836,14 +903,33 @@ FUNCTION priceOfOrbit {
   RETURN dvToRaiseApTo(apAlt) * lossFactor + circDvAt(apAlt) + reserveDvFor(apAlt).
 }
 
-// The same price, but for an *assumed* handover state rather than the live one.
-// The live-state versions above are what the in-flight policing needs; these are
-// what the pre-flight and post-flight sizing advice needs, because after the
-// flight the live state is orbit and dvToRaiseApTo() would read zero.
+// The deorbit reserve as the *handover* gauge would read it.  In flight this is
+// reserveDvFor(), which prices the post-release burn at the mass the ship has
+// right now; on the runway there is no such reading to take, so the mass at the
+// end of the climb is estimated from the handover mass and the dV about to be
+// spent getting there.  Skipping that step is not a rounding error: it charges
+// the pre-flight check the full post-release figure against a ship still
+// carrying every tonne of cargo and propellant, which on the reference airframe
+// is 146 m/s of reserve for a burn worth 80.  That is most of the gap the check
+// then reports, and it is the reason a flight that reached orbit with fuel to
+// spare was told on the runway that it could not.
+FUNCTION reserveFromHandover {
+  PARAMETER apAlt, dvToOrbit.
+  LOCAL vEx IS RKT_ISP * G0.
+  LOCAL mOrb IS handoverMass(0, 0, 0) * CONSTANT:E ^ (-MAX(0, dvToOrbit) / vEx).
+  RETURN heavyEquivalentAt(deorbitDvFrom(apAlt) + DV_MARGIN, mOrb).
+}
+
+// The same price as priceOfOrbit(), but for an *assumed* handover state rather
+// than the live one.  The live-state version above is what the in-flight
+// policing needs; this is what the pre-flight and post-flight sizing advice
+// needs, because after the flight the live state is orbit and dvToRaiseApTo()
+// would read zero.
 FUNCTION priceFromHandover {
   PARAMETER apAlt, altM, spd, lossF.
-  RETURN dvRaiseApFrom(altM, spd, apAlt) * lossF + circDvFrom(altM, apAlt) +
-         deorbitDvFrom(apAlt) + DV_MARGIN.
+  LOCAL dvClimb IS dvRaiseApFrom(altM, spd, apAlt) * lossF.
+  LOCAL dvCirc  IS circDvFrom(altM, apAlt).
+  RETURN dvClimb + dvCirc + reserveFromHandover(apAlt, dvClimb + dvCirc).
 }
 
 FUNCTION affordableApFrom {
@@ -1328,7 +1414,9 @@ SET planSwSpd  TO PLAN_SWITCH_SPD + ROT_BONUS.        // orbital speed at handov
 SET planClimb  TO dvRaiseApFrom(PLAN_SWITCH_ALT, planSwSpd, REQUESTED_APOAPSIS).
 SET planCirc   TO circDvFrom(PLAN_SWITCH_ALT, REQUESTED_APOAPSIS).
 SET planDeorb  TO deorbitDvFrom(REQUESTED_APOAPSIS).
-SET dvRequired TO planClimb * PLAN_LOSS_FACTOR + planCirc + planDeorb + DV_MARGIN.
+SET planClimbDv TO planClimb * PLAN_LOSS_FACTOR.
+SET planReserve TO reserveFromHandover(REQUESTED_APOAPSIS, planClimbDv + planCirc).
+SET dvRequired TO planClimbDv + planCirc + planReserve.
 SET dvAtPad    TO rocketDv().                         // every paired unit aboard
 SET dvHandover TO dvAtHandover(0, 0).                 // what survives the jets
 SET jetLfPlan  TO jetBurnWith(0, 0, 0).
@@ -1353,9 +1441,17 @@ IF lfSpare < jetLfPlan {
   PRINT "        !! The jets will eat " + ROUND((jetLfPlan - MAX(0, lfSpare)) / LF_DENS) +
         " units of PAIRED LF - that is rocket dV being spent as jet fuel.".
 }
-PRINT "  NEED  climb " + ROUND(planClimb * PLAN_LOSS_FACTOR) + " + circ " +
-      ROUND(planCirc) + " + deorbit " + ROUND(planDeorb) + " + margin " +
-      ROUND(DV_MARGIN) + "  =  " + ROUND(dvRequired) + " m/s".
+SET planResNote TO "".
+IF DEPLOY_BEFORE_DEORBIT AND payloadMass > 1 { SET planResNote TO "*". }
+PRINT "  NEED  climb " + ROUND(planClimbDv) + " + circ " + ROUND(planCirc) +
+      " + reserve " + ROUND(planReserve) + planResNote + "  =  " +
+      ROUND(dvRequired) + " m/s".
+IF planResNote <> "" {
+  PRINT "        (reserve* = deorbit " + ROUND(planDeorb) + " + margin " +
+        ROUND(DV_MARGIN) + ", flown after " + ROUND(payloadMass, 1) +
+        " t of payload comes off,".
+  PRINT "         priced against the gauge this ship will be reading in orbit.)".
+}
 // Note the handover figure can legitimately come out *above* the pad figure:
 // burning an LF-only reserve lightens the ship without touching a single
 // paired unit, which is exactly what that reserve is for.
@@ -2121,7 +2217,39 @@ IF NOT abortSuborbital {
   // ship is already past apoapsis and coming down, that condition will never
   // become true and the autopilot would hold the ship nose-prograde all the way
   // into the ground.
-  WAIT UNTIL SHIP:ALTITUDE > ATM_TOP OR SHIP:VERTICALSPEED < 0.
+  //
+  // And hold the apoapsis on the way up.  MECO fires the moment the apoapsis
+  // reading reaches the target, but the ship is still at 30 km doing orbital
+  // speed with 40 km of thinning air to climb through, and that air keeps
+  // charging: the 85 km flight cut the engines at 85.3 km of apoapsis and
+  // arrived in vacuum with 81.6.  Nothing downstream can give it back - thrust
+  // at apoapsis buys periapsis, not apoapsis - so it has to be held here, while
+  // the ship is still under its apoapsis and prograde thrust still moves it.
+  // Only ever with money that is not already promised to the circularisation
+  // and the deorbit, and never below the glide reserve.
+  SET trimDv0 TO rocketDv().
+  SET trimOn  TO FALSE.
+  SET trimT   TO TIME:SECONDS.
+  UNTIL SHIP:ALTITUDE > ATM_TOP OR SHIP:VERTICALSPEED < 0 {
+    IF COAST_TRIM AND TIME:SECONDS - trimT > 0.25 {
+      SET trimT TO TIME:SECONDS.
+      LOCAL apLack IS targetAp - SHIP:APOAPSIS.
+      LOCAL keep IS MAX(circDvAt(targetAp) + reserveDvFor(targetAp), DV_GLIDE_RESERVE).
+      LOCAL dvHere IS rocketDv().     // read once - it is not cheap in kOS
+      IF apLack > COAST_TRIM_TOL AND dvHere > keep {
+        SET thrCmd TO COAST_TRIM_THR.
+        SET trimOn TO TRUE.
+      } ELSE IF apLack <= 0 OR dvHere <= keep {
+        SET thrCmd TO 0.
+      }
+    }
+    WAIT 0.1.
+  }
+  SET thrCmd TO 0.
+  IF trimOn {
+    PRINT "Coast trim held the apoapsis through the air for " +
+          ROUND(trimDv0 - rocketDv()) + " m/s.".
+  }
   IF SHIP:ALTITUDE < ATM_TOP {
     SET abortSuborbital TO TRUE.
     PRINT "!! Apoapsis passed inside the atmosphere - no vacuum burn is possible.".
@@ -2133,8 +2261,24 @@ IF NOT abortSuborbital {
 }
 
 IF NOT abortSuborbital {
+  // Circularise at the apoapsis the ship actually arrived with, not the one it
+  // had at MECO.  Whatever the coast trim could not hold on to is gone, and a
+  // periapsis target built on the stale figure sits *above* the apoapsis the
+  // ship has - which no burn can ever reach.  That is what made the 85 km
+  // flight burn until the fuel floor: a 83.8 km periapsis target against an
+  // 81.6 km apoapsis, with every m/s after the circular point going into
+  // apoapsis instead.  It finished at 431 x 82 km.
+  IF SHIP:APOAPSIS < orbitAlt - 100 {
+    PRINT "Apoapsis is " + ROUND(SHIP:APOAPSIS / 1000, 1) + " km, not the " +
+          ROUND(orbitAlt / 1000, 1) + " km at MECO - " +
+          ROUND((orbitAlt - SHIP:APOAPSIS) / 1000, 1) + " km lost to the coast.".
+  }
+  SET orbitAlt TO SHIP:APOAPSIS.
   SET circDv   TO circDvAt(orbitAlt).
-  SET circBurn TO burnTimeFor(circDv).
+  // Half the burn before apoapsis and half after is what keeps the ship near the
+  // altitude it is circularising at.  The taper at the end is part of the burn,
+  // so it is part of what has to be centred.
+  SET circBurn TO burnTimeFor(circDv) + CIRC_TAPER_T.
   SET circLead TO clampVal(circBurn / 2, 5, 150).
   PRINT "Vacuum. ETA to apoapsis " + ROUND(ETA:APOAPSIS) + " s; circ burn ~" +
         ROUND(circBurn) + " s, starting " + ROUND(circLead) + " s early.".
@@ -2172,9 +2316,12 @@ IF NOT abortSuborbital {
 }
 
 // ---------------------------------------------------------------------------
-//  5. CIRCULARISE  --  and stop at the deorbit reserve, whatever happens
+//  5. CIRCULARISE  --  fly the velocity error, stop when it stops shrinking,
+//  and never eat the deorbit reserve
 // ---------------------------------------------------------------------------
-SET circStarved TO FALSE.
+SET circStarved TO FALSE.           // stopped on the fuel floor
+SET circStalled TO FALSE.           // stopped because it was no longer helping
+SET circGo      TO 0.               // dV still wanted to be circular here
 IF NOT abortSuborbital {
   SET circPeTarget TO MAX(ATM_TOP + PE_SAFETY, orbitAlt - CIRC_PE_TOL).
   SET circPeTarget TO MIN(circPeTarget, orbitAlt - 500).
@@ -2189,33 +2336,102 @@ IF NOT abortSuborbital {
           ROUND(deorbitDvFrom(orbitAlt)) + " + margin " + ROUND(DV_MARGIN) + ").".
   }
 
-  SET dvCheckT    TO TIME:SECONDS.
-  SET thrCmd TO 1.
-  UNTIL SHIP:PERIAPSIS >= circPeTarget {
-    // Ease the throttle down in the last stretch for a precise cut-off.
-    IF SHIP:PERIAPSIS > circPeTarget - 4000 { SET thrCmd TO 0.15. }
+  SET dvCheckT TO TIME:SECONDS.
+  SET circT0   TO TIME:SECONDS.
+  SET circVec  TO circBurnVec().
+  SET circGo   TO circVec:MAG.
+  SET circBest TO circGo.
+  SET circAim  TO SHIP:PROGRADE:VECTOR.
+  IF circGo > CIRC_AIM_MIN { SET circAim TO circVec. }
+  LOCK STEERING TO circAim.
 
-    // Hard stop: we will not eat the deorbit money to buy a rounder orbit.
-    // (Polled a few times a second - rocketDv() is not cheap in kOS.)
-    //
-    // But the deorbit reserve is only worth protecting while there is going to
-    // be an orbit to deorbit *from*.  Until periapsis is clear of the air the
-    // ship is on a reentry path already, no deorbit burn will ever be needed,
-    // and holding fuel back for one just guarantees the reentry is steeper than
-    // it had to be.  So the floor is the glide reserve until periapsis is up,
-    // and the full reserve only once it is.
-    IF TIME:SECONDS - dvCheckT > 0.25 {
-      SET dvCheckT TO TIME:SECONDS.
-      LOCAL circFloor IS DV_GLIDE_RESERVE.
-      IF SHIP:PERIAPSIS >= ATM_TOP {
-        SET circFloor TO MAX(reserveDvFor(orbitAlt), DV_GLIDE_RESERVE).
+  SET circDone TO FALSE.
+  SET thrCmd   TO 1.
+  UNTIL circDone {
+    SET circVec TO circBurnVec().
+    SET circGo  TO circVec:MAG.
+
+    IF circGo <= CIRC_DV_TOL OR SHIP:PERIAPSIS >= circPeTarget {
+      // Round enough.  Either the velocity error is inside the tolerance or the
+      // periapsis the mission asked for is already bought.
+      SET thrCmd TO 0.
+      SET circDone TO TRUE.
+    } ELSE {
+      // Point at what is left to do, not at prograde.  Near apoapsis the two are
+      // the same vector; once the ship has picked up any descent they are not,
+      // and the difference is the part prograde thrust cannot fix.  Below
+      // CIRC_AIM_MIN the direction is a small difference of two ~2 km/s vectors,
+      // so it is frozen rather than chased.
+      IF circGo > CIRC_AIM_MIN {
+        SET circAim TO circVec.
+        // ...with one thing taken back out.  The burn starts before apoapsis, so
+        // for its first half the ship is still climbing, and "circularise here"
+        // then contains a downward component that would spend thrust cancelling
+        // a climb the ascent has already paid for.  While the ship is rising,
+        // fly the flat part of the correction only; the vertical term is what
+        // the *second* half of the burn is for.
+        IF SHIP:VERTICALSPEED > 0 AND VDOT(circAim, SHIP:UP:VECTOR) < 0 {
+          LOCAL flatAim IS VXCL(SHIP:UP:VECTOR, circAim).
+          IF flatAim:MAG > 0.1 * circGo { SET circAim TO flatAim. }
+        }
       }
-      IF rocketDv() <= circFloor {
-        SET circStarved TO TRUE.
-        BREAK.
+
+      // Taper over the last CIRC_TAPER_T seconds of burn instead of dropping to
+      // a fixed low throttle on a periapsis threshold.  The old ease-down fired
+      // 4 km out - which on an 85 km orbit is the last 4 m/s of a 163 m/s burn -
+      // and stretched exactly the part of the burn where drifting off apoapsis
+      // costs the most.
+      LOCAL accNow IS SHIP:AVAILABLETHRUST / MAX(1, SHIP:MASS).
+      IF accNow <= 0.01 {
+        SET thrCmd TO 1.
+      } ELSE {
+        SET thrCmd TO clampVal(circGo / (accNow * CIRC_TAPER_T), CIRC_THR_MIN, 1).
+      }
+
+      IF circGo < circBest { SET circBest TO circGo. }
+
+      // The burn is over when it stops buying a rounder orbit.  Past the
+      // circular point every further m/s goes into apoapsis, and the ship is
+      // paying rocket fuel to make the orbit *worse* - which is precisely what
+      // ran 85 km out to 431 km.  The apoapsis ceiling is a second, blunter
+      // statement of the same thing, in case the velocity figure is ever fooled.
+      //
+      // Neither test may fire until periapsis is clear of the air.  Below that
+      // there is no orbit yet to protect, only a reentry with a good view, and
+      // a ship still climbing towards its apoapsis does drag periapsis up with
+      // it even while it is over circular speed.  Until it has an orbit the only
+      // things that stop this burn are the fuel floors.
+      IF SHIP:PERIAPSIS > ATM_TOP AND TIME:SECONDS - circT0 > CIRC_ARM_T AND
+         (circGo > circBest + CIRC_GIVEUP_DV OR
+          SHIP:APOAPSIS > orbitAlt + CIRC_AP_TOL) {
+        SET thrCmd TO 0.
+        SET circStalled TO TRUE.
+        SET circDone TO TRUE.
+      }
+
+      // Hard stop: we will not eat the deorbit money to buy a rounder orbit.
+      // (Polled a few times a second - rocketDv() is not cheap in kOS.)
+      //
+      // But the deorbit reserve is only worth protecting while there is going to
+      // be an orbit to deorbit *from*.  Until periapsis is clear of the air the
+      // ship is on a reentry path already, no deorbit burn will ever be needed,
+      // and holding fuel back for one just guarantees the reentry is steeper than
+      // it had to be.  So the floor is the glide reserve until periapsis is up,
+      // and the full reserve only once it is.
+      IF NOT circDone AND TIME:SECONDS - dvCheckT > 0.25 {
+        SET dvCheckT TO TIME:SECONDS.
+        LOCAL circFloor IS DV_GLIDE_RESERVE.
+        IF SHIP:PERIAPSIS >= ATM_TOP {
+          SET circFloor TO MAX(reserveDvFor(orbitAlt), DV_GLIDE_RESERVE).
+        }
+        IF rocketDv() <= circFloor {
+          SET thrCmd TO 0.
+          SET circStarved TO TRUE.
+          SET circDone TO TRUE.
+        }
       }
     }
-    WAIT 0.05.
+    IF NOT circDone { WAIT 0.05. }
   }
   SET thrCmd TO 0.
   UNLOCK STEERING.
@@ -2234,6 +2450,22 @@ IF NOT abortSuborbital {
 // the only test that means anything, and everything below is reported against it.
 SET inOrbit TO SHIP:PERIAPSIS > ATM_TOP.
 
+// A burn that stopped because it had stopped helping is not a burn that ran out
+// of money, and saying so mattered: the flight that ran 85 km out to 431 km was
+// reported as "stopped on the deorbit reserve", which reads as "bring more fuel"
+// when the fuel was never the problem.
+IF circStalled {
+  PRINT "!! Circularisation stopped where it stopped helping - " + ROUND(circGo, 1) +
+        " m/s from circular".
+  PRINT "   at " + ROUND(SHIP:ALTITUDE / 1000, 1) + " km, and no longer closing.".
+  IF SHIP:APOAPSIS > orbitAlt + CIRC_AP_TOL {
+    PRINT "   Apoapsis ran to " + ROUND(SHIP:APOAPSIS / 1000, 1) + " km against a " +
+          ROUND(orbitAlt / 1000, 1) + " km target: the burn was".
+    PRINT "   past circular and pushing apoapsis, so it was cut. Fuel is intact.".
+  } ELSE {
+    PRINT "   Anything further would have gone into apoapsis, not periapsis.".
+  }
+}
 IF circStarved {
   IF inOrbit {
     PRINT "!! Circularisation stopped on the deorbit reserve.".
@@ -2256,8 +2488,11 @@ IF NOT inOrbit {
         " km is inside the atmosphere -".
   PRINT "   this is a suborbital arc, not an orbit. The ship will reenter on".
   PRINT "   its own; do NOT run deorbit_land. Fly it home as a glider.".
-} ELSE IF settled {
-  PRINT "ORBIT ACHIEVED (settled below the requested " +
+} ELSE IF settled OR SHIP:APOAPSIS < REQUESTED_APOAPSIS - 1000 {
+  // Say it whichever way the ship ended up low: the climb settling for a cheaper
+  // orbit and the coast quietly costing a few km read identically on the map,
+  // and both are worth knowing before anyone plans a rendezvous on it.
+  PRINT "ORBIT ACHIEVED (below the requested " +
         ROUND(REQUESTED_APOAPSIS / 1000) + " km)".
 } ELSE {
   PRINT "ORBIT ACHIEVED".
