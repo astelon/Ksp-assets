@@ -235,6 +235,19 @@ this was visible on either flight.
 
 ## `PLAN_LOSS_FACTOR` — corrected again, to 1.65
 
+> **Superseded: it is now 1.36.** The 1.65 derived below is sound for the flight
+> it was measured on, but that flight was flown **before** the angle-of-attack
+> cap in the same PR, and it bought its apoapsis at 6–16 degrees of body drag.
+> The first 85 km flight with the cap in measured **×1.36** end to end by the
+> same `spent / paid` yardstick — 1019 m/s of rocket climb against an impulsive
+> 830 — and reached orbit with margin. Held at 1.65, the pre-flight check then
+> declared that ship 142 m/s short of a mission it flew with ~170 in hand.
+> The reasoning below still stands: this is a whole-climb constant, it carries
+> the opening, and it is never to be set from the trailing-window figure. Only
+> the climb it is measured on has got better. See
+> `docs/CIRCULARISE_REVIEW.md`.
+
+
 An earlier revision of this document set it to **1.30** on the strength of the
 PR #2 flight. That was wrong, and the mistake is worth naming because it is the
 same one the old code made: **1.30 is a marginal-climb figure and
