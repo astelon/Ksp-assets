@@ -77,13 +77,40 @@ SET RUNWAY_HDG     TO 90.
 
 // --- Tunables: deorbit ------------------------------------------------------
 SET DEORBIT_PE     TO 32000.     // target periapsis for the deorbit burn (m)
-// Ground-track angle before the KSC at which the burn is started.  Measured, not
-// guessed: on the reference reentry a 118 deg lead put the interface 552 km out,
-// and the ship crossed the field still at 26 km and 959 m/s - an energy height of
-// 73 km, worth another 329 km of glide.  Its true range from the interface is
-// therefore ~880 km, or 84 deg of ground track, so the burn has to happen ~31 deg
-// earlier.  See docs/REENTRY_REVIEW.md.
-SET DEORBIT_LEAD   TO 149.       // ground-track angle before KSC to start burn (deg)
+
+// HOW FAR OUT TO HIT THE AIR.  This, not the burn angle, is the number the
+// entry is really about: the ground range from the atmospheric interface to the
+// KSC is the distance the ship has to bleed 2 100 m/s across, and whether it is
+// enough is a question about the airframe, not about the orbit.
+//
+// The two reference flights bracket the answer.  Flown clean the ship made
+// ~880 km from the interface (it crossed the field from 552 km out still at
+// 26 km and 959 m/s - an energy height of 73 km, worth another 329 km of glide).
+// Flown at 40 deg of alpha with the boards out the whole way it made 530 km.
+// 800 km therefore sits mid-band: about 80 km of surplus for the entry to dump
+// if it flies clean, and about 270 km of dumping authority in hand if it does
+// not.  Both are inside what the energy loop can steer with, which is the point
+// - a schedule the ship cannot correct from either side is not a schedule.
+//
+// Trim rule: crossing the field with energy to spare means the ship out-flew
+// this number, so raise it; landing short means lower it.  100 km is 9.5 deg of
+// Kerbin ground track, so the steps are big and one flight tells you which way.
+SET ENTRY_RANGE    TO 800000.    // ground range from the interface to the KSC (m)
+
+// Ground-track angle before the KSC at which the burn is started.  Left at 0 it
+// is *solved* from ENTRY_RANGE and the coast arc the deorbit ellipse will sweep
+// between the burn and the interface (see coastArcDeg) - which is the honest
+// form of the number, because the arc depends on the parking altitude and on
+// DEORBIT_PE and a hand-trimmed lead angle silently stops being right when
+// either of those changes.  Set it non-zero to override the solution.
+// For the reference case - 100 km circular, periapsis 32 km - the solver returns
+// 149.5 deg for 800 km of entry range, against the 149 deg that was trimmed by
+// hand from flight data in docs/REENTRY_REVIEW.md: the same number to within
+// half a degree, arrived at from the geometry instead of from a crash.  It is
+// also the reason a hand-trimmed constant is dangerous - the coast arc is 63 deg
+// from a 90 km parking orbit and 85 from a 120 km one, so a lead angle trimmed
+// at one altitude is 230 km wrong at the other.
+SET DEORBIT_LEAD   TO 0.         // ground-track angle before KSC to start burn (deg)
 SET WARP_LEAD      TO 45.        // come out of warp this long before the burn (s)
 SET SCAN_STEP      TO 20.        // coarse step when hunting the deorbit point (s)
 SET SCAN_ORBITS    TO 2.         // how many orbits ahead to search for it
@@ -220,6 +247,10 @@ SET G0            TO 9.80665.
 SET BODY_MU       TO SHIP:BODY:MU.
 SET BODY_R        TO SHIP:BODY:RADIUS.
 SET BODY_ROT_RATE TO 360 / SHIP:BODY:ROTATIONPERIOD.   // deg/s, eastward
+// Read the interface height from the body rather than trusting Kerbin's 70 km:
+// the deorbit lead is solved from the coast down to it, so it has to be right
+// before the burn is planned, not just before the ship arrives there.
+IF SHIP:BODY:ATM:EXISTS { SET ENTRY_ALT TO SHIP:BODY:ATM:HEIGHT. }
 
 // ---------------------------------------------------------------------------
 //  Helpers
@@ -299,6 +330,44 @@ FUNCTION deorbitDvAt {
   IF rP >= rAt { RETURN 0. }
   LOCAL smaT IS (rAt + rP) / 2.
   RETURN MAX(0, VELOCITYAT(SHIP, tUT):ORBIT:MAG - SQRT(BODY_MU * (2 / rAt - 1 / smaT))).
+}
+
+// Ground-track angle swept between the deorbit burn and the atmospheric
+// interface.  The burn is retrograde and lowers the periapsis, so the burn point
+// *is* the apoapsis of the ellipse that results, and the whole geometry is fixed
+// by two radii: where the burn happens, and the periapsis it aims at.  Solve the
+// eccentric anomaly at the interface radius, turn it into a true anomaly for the
+// arc and into a mean anomaly for the time, and give the planet back the
+// rotation it performs underneath the ship while it coasts.
+//
+// This is the half of the deorbit lead that has nothing to do with the entry:
+// on a 100 km orbit aiming at a 32 km periapsis it is 73.1 degrees, and it is
+// 7.3 minutes of coast.  Add the range you want to hit the air at and you have
+// the burn angle - which is how DEORBIT_LEAD is now arrived at instead of being
+// trimmed by hand against one flight's mass and drag.
+FUNCTION coastArcDeg {
+  PARAMETER rBurn.
+  LOCAL rPe IS BODY_R + DEORBIT_PE.
+  LOCAL rIf IS BODY_R + ENTRY_ALT.
+  IF rBurn <= rIf OR rPe >= rIf { RETURN 0. }
+  LOCAL sma IS (rBurn + rPe) / 2.
+  LOCAL ecc IS (rBurn - rPe) / (rBurn + rPe).
+  IF ecc < 0.000001 { RETURN 0. }
+  // r = a(1 - e cos E), measured from periapsis: E = 0 at Pe, 180 at Ap.
+  LOCAL eAnom IS ARCCOS(clampVal(-1, 1, (sma - rIf) / (sma * ecc))).
+  LOCAL nu    IS 2 * ARCTAN2(SQRT(1 + ecc) * SIN(eAnom / 2),
+                             SQRT(1 - ecc) * COS(eAnom / 2)).
+  LOCAL mAnom IS eAnom - ecc * SIN(eAnom) * CONSTANT:RADTODEG.
+  LOCAL nDeg  IS SQRT(BODY_MU / (sma ^ 3)) * CONSTANT:RADTODEG.   // deg/s
+  IF nDeg <= 0 { RETURN 0. }
+  LOCAL dtCoast IS (180 - mAnom) / nDeg.
+  RETURN (180 - nu) - BODY_ROT_RATE * dtCoast.
+}
+
+// The burn angle that puts the interface ENTRY_RANGE short of the KSC.
+FUNCTION deorbitLeadFor {
+  PARAMETER rBurn.
+  RETURN ENTRY_RANGE / BODY_R * CONSTANT:RADTODEG + coastArcDeg(rBurn).
 }
 
 // Predicted altitude above the datum at universal time t.
@@ -673,6 +742,24 @@ FUNCTION groundRange {
   RETURN BODY_R * VANG(vShip, vTgt) * CONSTANT:DEGTORAD.
 }
 
+// Signed along-track range to the runway threshold, measured *in the landing
+// direction*: positive means the runway is still ahead of us and we are that far
+// short of it, negative means we have flown past it.  The cross-track figure is
+// the same range resolved across the centreline.
+//
+// groundRange() cannot tell those two apart, and neither could any report this
+// script has ever printed: "248.6 km from the runway" is the same line whether
+// the ship stopped 248 km short of the field or sailed 248 km beyond it, and
+// those two failures want opposite corrections to ENTRY_RANGE.  KSC_RWY:HEADING
+// is the bearing *to* the threshold, so comparing it with the runway heading is
+// the whole calculation.
+FUNCTION alongTrackToRwy {
+  RETURN groundRange(KSC_RWY) * COS(normAng(KSC_RWY:HEADING - RUNWAY_HDG)).
+}
+FUNCTION crossTrackToRwy {
+  RETURN groundRange(KSC_RWY) * SIN(normAng(KSC_RWY:HEADING - RUNWAY_HDG)).
+}
+
 // The point `dist` metres from `origin` along compass heading `hdgDeg`.
 FUNCTION geoOffset {
   PARAMETER origin, hdgDeg, dist.
@@ -816,6 +903,25 @@ PRINT "  In position: steering error " +
 // --- 1b. Calculate the node -------------------------------------------------
 UNTIL NOT HASNODE { REMOVE NEXTNODE. WAIT 0. }
 
+// Solve the burn angle from the range we want to hit the air at, unless one was
+// forced.  Two passes: the coast arc wants the radius at the burn point, and the
+// burn point is what the lead angle finds, so price it at the radius we are at
+// now (a circular parking orbit makes that nearly exact) and refine it once.
+IF DEORBIT_LEAD <= 0 {
+  SET DEORBIT_LEAD TO deorbitLeadFor(BODY_R + SHIP:ALTITUDE).
+  SET tLeadChk TO deorbitTimeAfter(TIME:SECONDS + 60).
+  IF tLeadChk > 0 {
+    SET DEORBIT_LEAD TO deorbitLeadFor(BODY_R + SHIP:BODY:ALTITUDEOF(POSITIONAT(SHIP, tLeadChk))).
+  }
+  PRINT "Deorbit lead solved: " + ROUND(DEORBIT_LEAD, 1) + " deg" +
+        "  (" + ROUND(ENTRY_RANGE / 1000) + " km of entry range + " +
+        ROUND(coastArcDeg(BODY_R + SHIP:ALTITUDE), 1) + " deg of coast arc).".
+} ELSE {
+  PRINT "Deorbit lead forced to " + ROUND(DEORBIT_LEAD, 1) + " deg (entry range " +
+        ROUND((DEORBIT_LEAD - coastArcDeg(BODY_R + SHIP:ALTITUDE))
+              * BODY_R * CONSTANT:DEGTORAD / 1000) + " km).".
+}
+
 // Size a rough burn first, so the search only offers deorbit points we can
 // still reach with the warp lead and half the burn in hand.
 SET tbGuess  TO burnTimeFor(deorbitDvAt(TIME:SECONDS + 60)).
@@ -910,8 +1016,6 @@ SET FAF_AGL TO FINAL_DIST * TAN(GLIDESLOPE).
 // it, so that attitude has to be the entry attitude: nose *prograde*, along the
 // airstream it is about to fly into, not looking back down its own wake.  Turn
 // first, then warp - on rails the ship cannot rotate.
-IF SHIP:BODY:ATM:EXISTS { SET ENTRY_ALT TO SHIP:BODY:ATM:HEIGHT. }
-
 PRINT "Turning prograde for entry.".
 LOCK STEERING TO SHIP:SRFPROGRADE.
 SET tAlign TO TIME:SECONDS + 120.
@@ -1048,7 +1152,7 @@ UNTIL SHIP:AIRSPEED < ENTRY_END_SPD OR SHIP:ALTITUDE < ENTRY_FLOOR {
     PRINT "  entry  alt " + ROUND(SHIP:ALTITUDE/1000, 1) + " km" +
           "  spd " + ROUND(SHIP:AIRSPEED) + " m/s" +
           "  AoA " + ROUND(gAoa) + "/" + ROUND(noseOff()) + " deg" +
-          "  fix " + ROUND(rngFAF/1000) + " km" +
+          "  rwy " + ROUND(alongTrackToRwy()/1000) + " km" +
           "  energy " + ROUND(eRatio, 2) +
           "  L/D " + ROUND(gLdMeas, 1).
     SET tNext TO TIME:SECONDS + 5.
@@ -1059,6 +1163,13 @@ RCS OFF.
 PRINT "Reentry heating survived: " + ROUND(SHIP:AIRSPEED) + " m/s at " +
       ROUND(SHIP:ALTITUDE/1000, 1) + " km, " +
       ROUND(groundRange(FAF)/1000, 1) + " km to the fix.".
+IF alongTrackToRwy() > 0 {
+  PRINT "  Runway is " + ROUND(alongTrackToRwy()/1000, 1) + " km ahead, " +
+        ROUND(ABS(crossTrackToRwy())/1000, 1) + " km off track.".
+} ELSE {
+  PRINT "  Runway is " + ROUND(-alongTrackToRwy()/1000, 1) + " km BEHIND - " +
+        "the entry overflew it. Raise ENTRY_RANGE.".
+}
 BRAKES OFF.
 
 // ---------------------------------------------------------------------------
@@ -1078,8 +1189,9 @@ goAirBreathing().
 SET gSturn  TO 1.
 SET tFlip   TO TIME:SECONDS + STURN_PERIOD.
 SET tNext   TO 0.
-SET gDepart TO 0.
-SET gLowQ   TO 0.
+SET gDepart  TO 0.
+SET gLowQ    TO 0.
+SET gPowerOn TO FALSE.
 
 PRINT "Gliding home. Ground range to the runway: " +
       ROUND(groundRange(KSC_RWY)/1000, 1) + " km.".
@@ -1088,8 +1200,15 @@ UNTIL (groundRange(FAF) < FAF_CAPTURE AND SHIP:ALTITUDE - RWY_ELEV < FAF_AGL + 1
       OR SHIP:ALTITUDE - RWY_ELEV < GLIDE_FLOOR {
   LOCAL rngFAF  IS groundRange(FAF).
   LOCAL agl     IS SHIP:ALTITUDE - RWY_ELEV.
-  LOCAL profAgl IS FAF_AGL + rngFAF / PLAN_LD.     // height this range should be flown at
   LOCAL spd     IS SHIP:AIRSPEED.
+  // The profile is a statement about *energy*, and the ship's altitude is only
+  // half of the energy it has.  Comparing bare altitude against it reads a ship
+  // at 5 km doing Mach 2 - an energy height of 26 km, wildly long, and about to
+  // fly straight past the field - as 2.5 km *below* profile, retracts the
+  // boards, and lights the jets.  Both sides are energy heights here: what the
+  // ship has, and what the range ahead of it costs.
+  LOCAL ehNow   IS energyHeight().
+  LOCAL profEh  IS FAF_AGL + APPR_SPEED * APPR_SPEED / (2 * G0) + rngFAF / PLAN_LD.
 
   // A departure is the nose refusing to follow the airstream for several seconds
   // running, not one frame of it: the ship arrives here rotating down from the
@@ -1121,7 +1240,7 @@ UNTIL (groundRange(FAF) < FAF_CAPTURE AND SHIP:ALTITUDE - RWY_ELEV < FAF_AGL + 1
     // The flight path is flown on drag and on track length, never on the nose -
     // and only while there is enough air under the wing to turn on.  S-turning a
     // wing that is barely flying is what puts a spaceplane on its back.
-    IF agl > profAgl + HIGH_MARGIN AND SHIP:DYNAMICPRESSURE > MANEUVER_Q {
+    IF ehNow > profEh + HIGH_MARGIN AND SHIP:DYNAMICPRESSURE > MANEUVER_Q {
       BRAKES ON.
       IF rngFAF < HOLD_RADIUS {
         // Overhead and far too high: spiral the excess off rather than chase a
@@ -1146,21 +1265,28 @@ UNTIL (groundRange(FAF) < FAF_CAPTURE AND SHIP:ALTITUDE - RWY_ELEV < FAF_AGL + 1
     // waiting until it is already stalled, which is when thrust is worth least -
     // on the reference flight it lit at 6.3 km and 70 m/s and burned the whole
     // reserve to nothing pointing at the sea.
-    LOCAL powered IS USE_JETS_SHORT AND resAmt("LiquidFuel") > JET_MIN_LF
-                     AND SHIP:ALTITUDE < JET_ARM_ALT
-                     AND (SHIP:DYNAMICPRESSURE < MANEUVER_Q OR agl < profAgl - LOW_MARGIN).
+    // Latched, not re-decided every pass: the profile band is a few hundred
+    // metres of energy height wide and a jet that lights and cuts across it
+    // burns the reserve in handfuls without ever buying a climb.
+    IF ehNow < profEh - LOW_MARGIN OR SHIP:DYNAMICPRESSURE < MANEUVER_Q {
+      SET gPowerOn TO TRUE.
+    } ELSE IF ehNow > profEh + LOW_MARGIN AND SHIP:DYNAMICPRESSURE > RECOVER_Q {
+      SET gPowerOn TO FALSE.
+    }
+    LOCAL powered IS gPowerOn AND USE_JETS_SHORT
+                     AND resAmt("LiquidFuel") > JET_MIN_LF
+                     AND SHIP:ALTITUDE < JET_ARM_ALT.
 
     IF powered {
       // Under thrust the two control laws swap ends.  The throttle holds the
       // speed, and the nose holds the *vertical speed* - because a nose already
       // trimmed for the target speed leaves thrust nowhere to go but up, and a
-      // ship that is short of the runway cannot climb its way there.  The
-      // ceiling is the lower of the glide profile and POWER_CEILING: there is
-      // nothing above it worth the fuel.
-      LOCAL ceilAgl IS MIN(profAgl, POWER_CEILING).
-      LOCAL vsWant  IS 0.
-      IF agl < ceilAgl - LOW_MARGIN      { SET vsWant TO POWER_CLIMB_VS. }
-      ELSE IF agl > ceilAgl + HIGH_MARGIN { SET vsWant TO -POWER_SINK_VS. }
+      // ship that is short of the runway cannot climb its way there.  Height is
+      // only worth buying while the ship is short of the energy the range costs,
+      // and never above POWER_CEILING.
+      LOCAL vsWant IS 0.
+      IF ehNow < profEh - LOW_MARGIN AND agl < POWER_CEILING { SET vsWant TO POWER_CLIMB_VS. }
+      ELSE IF ehNow > profEh + HIGH_MARGIN { SET vsWant TO -POWER_SINK_VS. }
       SET aoaCmd TO GLIDE_AOA + (vsWant - VERTICALSPEED) * VS_AOA_GAIN.
       SET gThrot TO clampVal(0, 1, THROT_MIN_PWR + (spdTgt - spd) * THROT_PER_MS).
     } ELSE {
@@ -1185,12 +1311,14 @@ UNTIL (groundRange(FAF) < FAF_CAPTURE AND SHIP:ALTITUDE - RWY_ELEV < FAF_AGL + 1
   // exactly the kind of thing that hides a problem like this one.
   IF TIME:SECONDS > tNext {
     LOCAL rngNow IS groundRange(FAF).
-    PRINT "  glide  alt " + ROUND(SHIP:ALTITUDE - RWY_ELEV) +
-          " m (profile " + ROUND(FAF_AGL + rngNow / PLAN_LD) + ")" +
+    PRINT "  glide  alt " + ROUND(SHIP:ALTITUDE - RWY_ELEV) + " m" +
+          "  energy " + ROUND(energyHeight()) +
+          "/" + ROUND(FAF_AGL + APPR_SPEED * APPR_SPEED / (2 * G0)
+                      + rngNow / PLAN_LD) + " m" +
           "  spd " + ROUND(SHIP:AIRSPEED) + "/" + ROUND(glideSpeedTarget()) + " m/s" +
           "  AoA " + ROUND(noseOff()) + " deg" +
           "  thr " + ROUND(gThrot * 100) + "%" +
-          "  to FAF " + ROUND(rngNow/1000, 1) + " km".
+          "  rwy " + ROUND(alongTrackToRwy()/1000, 1) + " km".
     SET tNext TO TIME:SECONDS + 5.
   }
   WAIT 0.1.
@@ -1253,7 +1381,8 @@ SAS ON.
 // Report what actually happened.  "Stopped on the runway" printed 19 km from the
 // threshold, in the sea, is worse than no report at all: the whole point of the
 // last line is to be the thing you can trust when you were not watching.
-SET rngEnd TO groundRange(KSC_RWY).
+SET rngEnd  TO groundRange(KSC_RWY).
+SET alongEnd TO alongTrackToRwy().
 PRINT "======================================================".
 IF SHIP:STATUS = "LANDED" AND rngEnd < 3000 {
   PRINT "STOPPED ON THE RUNWAY.".
@@ -1265,6 +1394,22 @@ IF SHIP:STATUS = "LANDED" AND rngEnd < 3000 {
   PRINT "!! NOT DOWN: still " + SHIP:STATUS + " at " +
         ROUND(SHIP:ALTITUDE - RWY_ELEV) + " m AGL, " +
         ROUND(SHIP:GROUNDSPEED) + " m/s.".
+}
+// Which side it missed on, and therefore which way to trim.  An unsigned range
+// is the same number for a ship that stopped 250 km short and one that overflew
+// the field by 250 km, and those two want opposite corrections.
+IF rngEnd > 3000 {
+  IF alongEnd > 0 {
+    PRINT "  SHORT by " + ROUND(alongEnd/1000, 1) + " km along the approach" +
+          " (" + ROUND(ABS(crossTrackToRwy())/1000, 1) + " km off the centreline).".
+    PRINT "  The entry did not reach: lower ENTRY_RANGE (now " +
+          ROUND(ENTRY_RANGE/1000) + " km) by about that much.".
+  } ELSE {
+    PRINT "  LONG by " + ROUND(-alongEnd/1000, 1) + " km past the threshold" +
+          " (" + ROUND(ABS(crossTrackToRwy())/1000, 1) + " km off the centreline).".
+    PRINT "  The entry out-flew its schedule: raise ENTRY_RANGE (now " +
+          ROUND(ENTRY_RANGE/1000) + " km) by about that much.".
+  }
 }
 PRINT "  Ground range to runway threshold: " + ROUND(rngEnd) + " m".
 PRINT "  Fuel remaining -- LiquidFuel: " + ROUND(resAmt("LiquidFuel")) +

@@ -185,21 +185,97 @@ short of it whenever there is more than `COAST_WARP_MIN` (60 s) to wait. Attitud
 first, warp second — on rails the ship cannot rotate — and the lead is kept back
 to put the nose back on the airstream afterwards.
 
+## 6. Nobody could tell which side it missed on
+
+The question this review was opened to answer — *is the entry scheduling enough
+distance to slow down and still reach the KSC?* — could not be answered from any
+line the script has ever printed, because every one of them is an unsigned range.
+`groundRange()` returns a distance, not a displacement, so
+`DITCHED IN THE WATER 248.6 km from the runway` is the identical line whether the
+ship stopped 248 km short of the field or sailed 248 km beyond it. Those two
+failures want opposite corrections, and telling them apart was left to whoever
+was watching the map.
+
+For the flight above the answer turns out to be **short**, and the log proves it
+without the map: the glide's range to the fix falls to 273.3 km and then stops
+falling — 275.5, 275.4, 275.5, 275.2, 275.1 — the ship was not flying anywhere
+near the field, it was sinking. It never got closer than 273 km, and the
+diversion closed from 282.2 km to 248.6 km before it hit the water, i.e. it was
+still crawling *toward* the KSC when it ditched.
+
+**Changed.** `alongTrackToRwy()` resolves the range onto the landing direction:
+positive is the runway still ahead (short), negative is the runway behind
+(overflown). It goes in the entry line, the glide line, a note at the end of the
+entry, and the closing report, which now says `SHORT by 248.6 km along the
+approach` or `LONG by …`, plus the cross-track miss, plus which way to trim.
+
+## 7. Was it scheduling enough distance? — and `DEORBIT_LEAD` is now solved
+
+`DEORBIT_LEAD` was a hand-trimmed 149°, and a lead angle is a proxy for the thing
+that actually matters: the ground range from the atmospheric interface to the
+KSC, which is the distance the ship has to bleed 2 100 m/s across. That distance
+is now the tunable — `ENTRY_RANGE`, 800 km — and the burn angle is derived from
+it.
+
+The derivation is exact and has nothing to do with the airframe. A retrograde
+burn makes the burn point the *apoapsis* of the ellipse it creates, so the coast
+from there to the interface is fixed by two radii — where the burn happens and
+the periapsis it aims at. `coastArcDeg()` solves the eccentric anomaly at the
+interface radius, turns it into a true anomaly for the arc and a mean anomaly for
+the time, and hands the planet back the rotation it performs underneath the ship
+meanwhile. For a 100 km parking orbit aiming at a 32 km periapsis that is
+**73.1° of ground track over 7.25 minutes**, and
+
+```
+lead = 800 km / 10.47 km-per-deg + 73.1° = 149.5°
+```
+
+— the hand-trimmed 149° to within half a degree, which is a good sign for both
+numbers. It also shows what a fixed lead angle was hiding: the coast arc is 63.4°
+from a 90 km parking orbit and 85.4° from a 120 km one, so a lead trimmed at one
+parking altitude is **230 km wrong** at the other, and changing `DEORBIT_PE`
+moves it too. Setting `DEORBIT_LEAD` non-zero still overrides the solution.
+
+So: is 800 km enough? The two reference flights bracket the airframe rather than
+the geometry:
+
+| Flight | How it was flown | Range made from the interface |
+|---|---|---|
+| `REENTRY_REVIEW` | mostly clean, low alpha | ~880 km |
+| this one | 40° alpha + boards, the whole way | ~530 km |
+
+800 km sits mid-band: about 80 km of surplus for the entry to dump if it flies
+clean, and 270 km of dumping authority in hand if it does not. Both are inside
+what the energy loop can steer with — which is the property to hold onto, because
+a schedule the ship cannot correct from *either* side is not a schedule. The
+overshoots that prompted the question are the other end of the same failure as
+this crash: an entry that cannot tell how much range it is really buying cannot
+tell how much to throw away, and it is as capable of sailing past the field as of
+falling short of it.
+
+One more thing had to change for a long arrival to be survivable. The glide
+compared bare **altitude** against the profile, and altitude is only half the
+energy the ship has: a ship at 5 km doing Mach 2 — energy height 26 km, wildly
+long, and about to fly straight past the KSC — read as 2.5 km *below* profile,
+which retracts the boards and lights the jets. Both sides of that comparison are
+now energy heights, so a fast arrival dumps energy instead of being handed
+thrust.
+
 ## What to watch on the next flight
 
-1. `energy` and the new `L/D` field in the entry line. If the measured L/D sits
+1. `rwy` in the entry and glide lines, and the `SHORT by` / `LONG by` line in the
+   report. This is the one number that decides `ENTRY_RANGE`, and the correction
+   is roughly one-for-one: overflying the field by 200 km means raising
+   `ENTRY_RANGE` by about 200 km.
+2. `energy` and the new `L/D` field in the entry line. If the measured L/D sits
    near 2 with the boards in and the alpha low, `ENTRY_LD` is simply optimistic
    for this airframe and should come down to match; the range plan will then be
    honest from the interface rather than from 24 km.
-2. The `AoA 12/14 deg` pair in the entry line — command and actual. They should
+3. The `AoA 12/14 deg` pair in the entry line — command and actual. They should
    track within a few degrees. A persistent gap means `REENTRY_AOA` is past what
    this ship can trim to, and the cap will now say so out loud.
-3. `spd 251/247 m/s` in the glide line — actual and target. The target should
+4. `spd 251/247 m/s` in the glide line — actual and target. The target should
    climb with altitude; if the ship cannot hold it in the thin air just after
    handover that is expected, and it will converge as it descends.
-4. Whether the jets ever run with a positive vertical speed. They should not,
+5. Whether the jets ever run with a positive vertical speed. They should not,
    except inside a stall recovery.
-5. `DEORBIT_LEAD` is unchanged at 149°. It was trimmed against a flight whose
-   entry was throwing its range away; with the range plan fixed the ship should
-   arrive long rather than short, and 149 is now the first number to reconsider —
-   downward — if it does.

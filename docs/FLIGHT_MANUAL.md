@@ -186,9 +186,15 @@ high-AoA reentry → energy-managed glide homing on the final approach fix →
 capture heading 090 → glideslope → flare → gear down → touchdown → brake to a
 stop.
 
-The deorbit point is *solved*, not waited out: the script scans the next two
-orbits with `POSITIONAT`, correcting for Kerbin's own rotation, bisects the
-moment the ground track is `DEORBIT_LEAD` short of the KSC, prices the burn off
+The deorbit point is *solved*, not waited out — and so is the angle it is solved
+for. A retrograde burn makes the burn point the apoapsis of the ellipse it
+creates, so the coast from there to the interface is fixed by two radii, and
+`coastArcDeg()` returns the ground track that coast sweeps (73.1° and 7.25 min on
+a 100 km orbit aiming at 32 km). `DEORBIT_LEAD` is that arc plus `ENTRY_RANGE`
+converted to degrees, which reproduces the hand-trimmed 149° to within half a
+degree and, unlike it, follows the parking altitude. The script then scans the
+next two orbits with `POSITIONAT`, correcting for Kerbin's own rotation, bisects
+the moment the ground track is `DEORBIT_LEAD` short of the KSC, prices the burn off
 the orbit it will be on at that instant, and warps there. It gets pointed
 retrograde *before* warping, because on rails the ship cannot rotate — and
 re-settles on the node burn vector after dropping out, since inertial attitude
@@ -331,7 +337,8 @@ The landing tunables worth knowing if a reentry goes wrong:
 
 | Tunable | Default | What it does |
 |---|---|---|
-| `DEORBIT_LEAD` | 149° | Ground-track angle before the KSC at which the burn is made. **The** number to trim if the ship arrives with energy to spare (raise it) or on the jets (lower it) — see `docs/REENTRY_REVIEW.md` for how it was measured. It was trimmed against a flight whose entry was throwing its range away, so it is the first number to reconsider now that the range plan is honest — see `docs/GLIDE_REVIEW.md`. |
+| `ENTRY_RANGE` | 800 km | Ground range from the atmospheric interface to the KSC — **the** number to trim, and the one the whole entry is about. The ship makes ~880 km from the interface flown clean and ~530 km flown at full alpha with the boards out, so 800 km sits mid-band with dumping authority in hand either way. Overflying the field by *n* km means raising this by about *n*; landing short by *n* means lowering it. The report says which. |
+| `DEORBIT_LEAD` | 0 (solved) | Ground-track angle before the KSC at which the burn is made. Left at 0 it is solved from `ENTRY_RANGE` plus the coast arc the deorbit ellipse sweeps between the burn and the interface — 73.1° on a 100 km orbit, but 63° from 90 km and 85° from 120 km, which is why a hand-trimmed angle silently stops being right when the parking altitude or `DEORBIT_PE` changes. Set it non-zero to force one. See `docs/GLIDE_REVIEW.md`. |
 | `REENTRY_AOA` | 40° | Alpha held while hypersonic. Lower it if the ship balloons back out of the atmosphere. |
 | `ENTRY_AOA_HI` / `ENTRY_AOA_LO` | 2000 / 500 m/s | Airspeeds the entry AoA is tapered between. Raise `ENTRY_AOA_LO` if the ship is still fast when the glide starts. |
 | `ENTRY_END_SPD` / `ENTRY_FLOOR` | 650 m/s / 15 km | Handover to the glide. The **speed** is the handover; the altitude is only a backstop. Do not turn this back into "whichever comes first". |
@@ -352,7 +359,7 @@ The landing tunables worth knowing if a reentry goes wrong:
 | `POWER_CEILING` / `POWER_CLIMB_VS` | 7 km / 5 m/s | Under thrust the throttle holds the speed and the nose holds the vertical speed. These bound the climb: a ship short of the runway cannot climb its way there. |
 | `THROT_PER_MS` / `THROT_MIN_PWR` | 0.02 / 0.25 | Powered speed loop: throttle per m/s of error, and the throttle held with the speed on target. |
 | `AOA_PER_MS` | 0.05°/m/s | Speed-loop gain. Raise for a tighter speed hold, lower if the nose hunts. |
-| `PLAN_LD` | 4.5 | Glide ratio the energy plan assumes. Too optimistic and the ship lands short; too pessimistic and it S-turns the whole way home. |
+| `PLAN_LD` | 4.5 | Glide ratio the energy plan assumes. Too optimistic and the ship lands short; too pessimistic and it S-turns the whole way home. The glide profile it defines is compared against the ship's **energy height**, not its altitude — a ship at 5 km doing Mach 2 is long, not low. |
 | `HIGH_MARGIN` / `LOW_MARGIN` | 1500 / 400 m | Deadband either side of the profile before energy is dumped or the jets are lit. |
 | `HOLD_RADIUS` | 8 km | Inside this, excess height is spiralled off over the field instead of flown off in S-turns. |
 | `FINAL_DIST` | 9 km | How far short of the threshold the final approach fix sits. |
