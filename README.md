@@ -44,6 +44,7 @@ tools/check_kos.py           Static checker for the .ks scripts - run before fly
 docs/BUILD_GUIDE.md          Part-by-part manifest + manual rebuild instructions
 docs/FLIGHT_MANUAL.md        Action groups + how to fly it (auto or by hand)
 docs/DESIGN.md               Mass & ΔV budget, ascent profile, design rationale
+docs/*_REVIEW.md             Flight-data reviews - where the tuned constants came from
 ```
 
 ---
