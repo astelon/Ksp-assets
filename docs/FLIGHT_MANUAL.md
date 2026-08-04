@@ -181,9 +181,10 @@ RUN deorbit_land.
 
 Sequence: orient retrograde → predict the deorbit point (lead angle before the
 KSC) and plant a maneuver node there → time-warp to the burn → burn periapsis
-down to ~32 km → high-AoA reentry → energy-managed glide homing on the final
-approach fix → capture heading 090 → glideslope → flare → gear down → touchdown
-→ brake to a stop.
+down to ~32 km → **turn prograde and warp the coast down to the interface** →
+high-AoA reentry → energy-managed glide homing on the final approach fix →
+capture heading 090 → glideslope → flare → gear down → touchdown → brake to a
+stop.
 
 The deorbit point is *solved*, not waited out: the script scans the next two
 orbits with `POSITIONAT`, correcting for Kerbin's own rotation, bisects the
@@ -194,6 +195,15 @@ re-settles on the node burn vector after dropping out, since inertial attitude
 drifts away from retrograde during the coast. Warp ends `WARP_LEAD` seconds
 early to leave room for that. If no crossing is found (a wildly inclined or
 non-circular orbit), it says so and falls back to the old real-time wait.
+
+The burn over, the ship turns **prograde** — there is nothing left to point the
+engines at, and the attitude it holds through the coast is the attitude it meets
+the air in, so it had better be the entry attitude and not a view of its own
+wake. Then the coast itself is solved rather than sat through: `coastTimeTo()`
+bisects the predicted trajectory for the moment it falls through the atmosphere
+height, prints it, and warps to `COAST_LEAD` seconds short of it whenever that
+is worth more than `COAST_WARP_MIN`. Rails freeze attitude, so the nose is put
+back on the airstream with the lead that was kept back for it.
 
 #### How the atmospheric part is flown
 
@@ -220,8 +230,18 @@ the top of it, and `docs/REENTRY_REVIEW.md` is the flight that proves why:
   under the wing, or with the nose more than `DEPART_AOA` off the airstream for
   three seconds, the ship is not flying and no amount of navigation fixes that:
   `stallRecover()` unloads the wing, levels the wings, stops asking for a turn,
-  lights the jets, puts RCS back on (at 40 m/s the control surfaces have nothing
-  to bite) and dives until the wing is back.
+  lights the jets (only below `JET_ARM_ALT`, where jets are worth their fuel),
+  puts RCS back on (at 40 m/s the control surfaces have nothing to bite) and
+  dives until the wing is back. It is back when the pressure has returned **and**
+  the nose is within `RECOVER_NOSE` of the airstream, and the turn demand stays
+  off for `STEADY_TIME` after that — a recovery that ends on the pressure gauge
+  alone hands the guidance law a ship at exactly the speed that just failed, and
+  the next turn command departs it again. See `docs/GLIDE_REVIEW.md`.
+* **A wing flies on pressure, not on a number.** Every target speed below the
+  entry is `GLIDE_Q` converted into an airspeed in the air the ship is actually
+  in. A fixed 160 m/s target is 0.037 atm at 12 km — below this script's own
+  minimum for a banked turn — and commanding it is what made the glide stall,
+  spin, recover and stall again the whole way down.
 
 * **Entry** holds `REENTRY_AOA` while there is orbital energy to throw away and
   tapers it toward the glide angle between `ENTRY_AOA_HI` and `ENTRY_AOA_LO`
@@ -231,8 +251,15 @@ the top of it, and `docs/REENTRY_REVIEW.md` is the flight that proves why:
   problem, because that is where the energy to solve it is: it prices
   `rangeCapability()` — energy height × the L/D it will average shedding it,
   `ENTRY_LD` while hypersonic — against the range still to fly, and holds more
-  alpha (alpha is drag) or S-turns when long, gives alpha up to stretch when
-  short. Inside `ENTRY_HOLD_RNG` it stops chasing a bearing that swings through
+  alpha (alpha is drag), puts the boards out and S-turns when long, gives all
+  three up to stretch when short. The L/D is not taken on trust: the entry
+  measures the range it is actually buying per metre of energy height and never
+  credits itself with more than it is getting, because a nominal model that
+  credits a slowing ship with a rising L/D at the rate the extra drag is
+  destroying it reads "long" all the way to the point where it is 292 km short.
+  Nor is the *attitude* taken on trust — alpha the airframe cannot hold is capped
+  back to what it can, and a nose that lets go of the airstream is recovered
+  rather than logged. Inside `ENTRY_HOLD_RNG` it stops chasing a bearing that swings through
   180° as the field passes underneath. Entry ends at `ENTRY_END_SPD`;
   `ENTRY_FLOOR` is a backstop, not an alternative — handing a Mach 3 ship to a
   glide law is what the old "whichever comes first" rule did, and it cost a ship.
@@ -243,16 +270,22 @@ the top of it, and `docs/REENTRY_REVIEW.md` is the flight that proves why:
   `STURN_OFFSET` S-turns when above the `PLAN_LD` profile *and* with `MANEUVER_Q`
   of air under the wing, and inside `HOLD_RADIUS` excess height is spiralled off over
   the field. Short of profile **or** slow, with `USE_JETS_SHORT` set, the RAPIERs
-  go back to **air-breathing** and push — armed on speed as well as on the
-  profile, so the thrust arrives while it is still worth something.
+  go back to **air-breathing** and push — armed on pressure as well as on the
+  profile, so the thrust arrives while it is still worth something. With them lit
+  the two control laws swap ends: the throttle holds the speed and the nose holds
+  the vertical speed, capped at `POWER_CLIMB_VS` and never above `POWER_CEILING`.
+  Flying the glider law under thrust is what makes an autopilot climb at full
+  throttle until the tanks are dry — the nose is already holding the target
+  speed, so every newton goes into altitude.
 * **Final** flies nose-for-speed, boards-for-glideslope — the way a glider is
   flown — with a localiser term (`LOC_GAIN`, `LOC_MAX`) closing on the
   centreline, wings level below 120 m, then the flare at `FLARE_ALT`.
 * **Divert.** The glide's `GLIDE_FLOOR` is not a runway capture. Out of height
   more than `DIVERT_RANGE` from the field, the script says so and flies a
   wings-level landing straight ahead, because banking a low, slow ship toward a
-  runway it cannot reach arrives inverted rather than merely somewhere else. The
-  closing report reads `SHIP:STATUS`: it prints `STOPPED ON THE RUNWAY` only when
+  runway it cannot reach arrives inverted rather than merely somewhere else. It
+  is a landing, so it descends: thrust buys speed only, and only while the ship
+  is going down. The closing report reads `SHIP:STATUS`: it prints `STOPPED ON THE RUNWAY` only when
   that is what happened, and `DITCHED` or `DOWN AND STOPPED n km from the runway`
   when it is not.
 
@@ -266,7 +299,7 @@ usually still at 100%, and the jets are back on air by then.
 
 Both scripts expose their tunables at the top — trim
 `ROTATE_SPEED`, `DV_MARGIN`, `DV_GLIDE_RESERVE`, `DEORBIT_LEAD`, `WARP_LEAD`,
-`GLIDE_SPEED`, `FLARE_ALT`, etc. to taste. `DEORBIT_PE` appears in *both* scripts
+`GLIDE_Q`, `FLARE_ALT`, etc. to taste. `DEORBIT_PE` appears in *both* scripts
 and should match: the ascent script reserves the ΔV that the deorbit script will
 spend.
 
@@ -298,18 +331,26 @@ The landing tunables worth knowing if a reentry goes wrong:
 
 | Tunable | Default | What it does |
 |---|---|---|
-| `DEORBIT_LEAD` | 149° | Ground-track angle before the KSC at which the burn is made. **The** number to trim if the ship arrives with energy to spare (raise it) or on the jets (lower it) — see `docs/REENTRY_REVIEW.md` for how it was measured. |
+| `DEORBIT_LEAD` | 149° | Ground-track angle before the KSC at which the burn is made. **The** number to trim if the ship arrives with energy to spare (raise it) or on the jets (lower it) — see `docs/REENTRY_REVIEW.md` for how it was measured. It was trimmed against a flight whose entry was throwing its range away, so it is the first number to reconsider now that the range plan is honest — see `docs/GLIDE_REVIEW.md`. |
 | `REENTRY_AOA` | 40° | Alpha held while hypersonic. Lower it if the ship balloons back out of the atmosphere. |
 | `ENTRY_AOA_HI` / `ENTRY_AOA_LO` | 2000 / 500 m/s | Airspeeds the entry AoA is tapered between. Raise `ENTRY_AOA_LO` if the ship is still fast when the glide starts. |
 | `ENTRY_END_SPD` / `ENTRY_FLOOR` | 650 m/s / 15 km | Handover to the glide. The **speed** is the handover; the altitude is only a backstop. Do not turn this back into "whichever comes first". |
-| `ENTRY_LD` | 3.0 | Ground range flown per metre of energy height while hypersonic — measured, not the glide ratio. Sets how long the entry thinks its range is. |
-| `ENERGY_LONG` / `ENERGY_SHORT` | 1.08 / 0.95 | Range-capability ratios at which the entry starts dumping energy or stretching. The ratio is printed every 5 s as `energy`. |
+| `ENTRY_LD` | 3.0 | Ground range flown per metre of energy height while hypersonic — measured, not the glide ratio. The *nominal* figure only: the entry measures what it is actually getting (printed as `L/D`) and never credits itself with more than that. |
+| `LD_SAMPLE` / `LD_FILTER` | 5 s / 0.35 | How often the flown L/D is measured and how hard each sample is believed. |
+| `ENERGY_LONG` / `ENERGY_SHORT` | 1.15 / 1.00 | Range-capability ratios at which the entry starts dumping energy (boards, alpha, S-turns) or stretching. The ratio is printed every 5 s as `energy`. |
+| `ENTRY_HOLD_TOL` / `ENTRY_TRIM_TOL` | 25° / 12° | How far past the commanded alpha the nose may actually sit before the entry calls it departed, and before it caps the alpha it asks for. |
 | `GLIDE_AOA_MAX` / `FAST_AOA_MAX` | 14° / 8° | Hard stall guard, and the tighter ceiling above `FAST_SPD` where 14° is not a stall risk but a lift spike. No phase is allowed past either. |
 | `STALL_Q` / `MANEUVER_Q` / `RECOVER_Q` | 0.025 / 0.045 / 0.050 atm | Dynamic pressure at which the wing is considered gone, at which full bank and energy-dumping are allowed, and which a recovery flies back to. Pressure, not airspeed: 76 m/s at 9 km and 76 m/s over the runway are not the same flight state, and any airspeed threshold that catches the first is above the 110 m/s this ship flies its approach at. |
 | `DEPART_AOA` | 30° | Actual nose-to-airstream angle in the glide that counts as departed, held for 3 s. |
+| `RECOVER_NOSE` / `STEADY_TIME` | 20° / 6 s | A recovery ends when the wing has air **and** the nose is following the airstream, and no turn is demanded for `STEADY_TIME` afterwards. Ending on pressure alone is how one stall becomes six. |
+| `COAST_WARP_MIN` / `COAST_LEAD` | 60 / 30 s | The coast from the deorbit burn to the interface is solved and warped away when it is longer than the first; warp ends the second before the air. |
 | `JET_ARM_ALT` | 12 km | Ceiling for a jet save. Below it the jets light on low pressure under the wing *or* on being below profile. |
 | `YAW_SPD_HI` / `YAW_SPD_LO` / `YAW_SUB_MAX` | 1200 / 250 m/s / 60° | The heading-authority schedule: pinned to `ENTRY_YAW_MAX` above the first, opened to `YAW_SUB_MAX` below the second. |
-| `GLIDE_SPEED` / `APPR_SPEED` | 160 / 110 m/s | Target airspeeds for the glide and for final. |
+| `GLIDE_Q` | 0.07 atm | The dynamic pressure the glide is flown at. **This is the glide speed** — constant q is constant lift coefficient, which is best-glide at every altitude: 110 m/s over the runway, 160 at 6 km, 250 at 12 km, 450 at 20 km. |
+| `GLIDE_SPD_MIN` / `GLIDE_SPD_MAX` | 110 / 450 m/s | The ends of the range that answer is allowed to come out in. |
+| `APPR_SPEED` | 110 m/s | Target airspeed on final, where `GLIDE_Q` and 110 m/s are the same thing. |
+| `POWER_CEILING` / `POWER_CLIMB_VS` | 7 km / 5 m/s | Under thrust the throttle holds the speed and the nose holds the vertical speed. These bound the climb: a ship short of the runway cannot climb its way there. |
+| `THROT_PER_MS` / `THROT_MIN_PWR` | 0.02 / 0.25 | Powered speed loop: throttle per m/s of error, and the throttle held with the speed on target. |
 | `AOA_PER_MS` | 0.05°/m/s | Speed-loop gain. Raise for a tighter speed hold, lower if the nose hunts. |
 | `PLAN_LD` | 4.5 | Glide ratio the energy plan assumes. Too optimistic and the ship lands short; too pessimistic and it S-turns the whole way home. |
 | `HIGH_MARGIN` / `LOW_MARGIN` | 1500 / 400 m | Deadband either side of the profile before energy is dumped or the jets are lit. |
