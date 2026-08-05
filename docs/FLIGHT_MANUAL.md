@@ -173,6 +173,61 @@ If the ship is so short of ΔV that the apoapsis never clears the atmosphere, th
 script says so, skips circularisation, and hands back a glider with fuel still in
 the tanks — no deorbit burn is needed from there.
 
+### Meeting a station
+
+```
+RUN rendezvous.                    // whatever is selected as target on the map
+RUN rendezvous("Station Alpha").   // or by name - a substring is enough
+RUN rendezvous("Alpha", 250).      // ...and a park distance, in metres
+```
+
+Both parameters are optional. With no name the script uses the map's target
+selection; with one it matches case-insensitively on any part of the vessel
+name, and **refuses an ambiguous match** rather than guessing — guessing between
+two stations is how a ship ends up alongside the wrong one after a two-hour
+phasing wait. It stops a few hundred metres out and hands over; it does **not**
+dock.
+
+Sequence: acquire and validate the target → map the fuel network and isolate the
+payload → price the whole rendezvous and log the resources aboard → plane match
+→ tidy the orbit if the ascent left it eccentric → solve and fly a phasing orbit
+→ warp the wait → transfer injection, refined against the real geometry →
+mid-course correction → kill the relative velocity at closest approach → RCS
+approach to the park distance → report and hand over.
+
+The part worth understanding before you run it: **the phasing orbit is solved,
+not picked.** A Hohmann transfer needs the target at a particular lead angle
+when you leave, and that angle comes round at a rate set by the difference
+between the two orbital periods. If you are at 100 km and the station is at
+100 km, that rate is *zero* — the angle never arrives, and a script that waits
+for it waits forever. So the script sweeps candidate phasing radii, prices each
+(two burns in and out, against the wait it buys), and flies the cheapest one
+whose total time fits `MAX_TOTAL_TIME`. Your current orbit is one of the
+candidates, so "just wait here" wins whenever it is affordable.
+
+**If a plan looks expensive, give it more time.** `MAX_TOTAL_TIME` defaults to
+two hours; raising it routinely finds plans that cost a fraction as much. The
+budget block prints the phasing orbit it chose and what the detour cost, so the
+trade is visible before anything burns.
+
+Two safety properties are worth knowing about:
+
+* **Nothing spends the deorbit reserve.** Every burn is policed against the fuel
+  needed to get home, priced at the mass the deorbit will actually be flown at —
+  i.e. *after* the cargo comes off at the station. A burn that would breach it
+  stops and says so.
+* **The approach speed is what the ship can stop from**, computed from the
+  translational authority the RCS really has at the mass really aboard. If the
+  ship somehow arrives closing faster than the thrusters can brake, the main
+  engine comes back on and the nose swings onto the braking vector until it is
+  back inside the envelope.
+
+Monopropellant is budgeted separately and reported separately — the approach is
+flown on RCS, and running mono dry a hundred metres off a station leaves the ship
+drifting. See [`docs/RENDEZVOUS.md`](RENDEZVOUS.md) for the full derivation, the
+tunables, and how the geometry and the approach law were verified outside the
+game.
+
 ### Home again
 
 ```
@@ -387,6 +442,10 @@ a long tail of ordinary words are built-ins too, so `LOCAL queue IS LIST().`
 will not compile. Assigning a *bound* variable is fine (`SET WARP TO 0.` is the
 documented way out of time warp); declaring one over it is not.
 
+Writing `rendezvous.ks` walked straight into the same trap from a new direction:
+`TRANSFER`, `VESSEL`, `NODE` and `TARGET` are every one of them words you reach
+for while writing a rendezvous, and all four are taken. Run the checker.
+
 ---
 
 ## Manual flight (no kOS)
@@ -431,5 +490,10 @@ documented way out of time warp); declaring one over it is not.
   cockpit. Open the shield (AG 3), enable **RCS (R)**, approach your station's
   port from below/alongside, and dock. The 8 RV-105 blocks + monopropellant give
   full translation control.
+  `RUN rendezvous.` will do everything up to this point for you — it parks a few
+  hundred metres out with the relative velocity dead, the nose on the target and
+  RCS on, which is the state the last few hundred metres want to start from. It
+  stops there deliberately: choosing a port at both ends is a different problem
+  and gets its own script.
 * **Power**: the 4 RTGs supply power indefinitely; the Z-4K banks cover peaks.
   You can leave the ship parked without worrying about batteries.
