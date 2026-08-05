@@ -38,12 +38,14 @@ other brings it home and lands it back on the runway.
 ```
 craft/Mk3_Titan_SSTO.craft   The spaceplane (drop into your KSP save)
 scripts/ascent.ks            Runway -> orbit autopilot, ΔV-budgeting (kOS)
+scripts/rendezvous.ks        Orbit -> park alongside a station or vessel (kOS)
 scripts/deorbit_land.ks      Deorbit -> reentry -> runway landing autopilot (kOS)
 tools/build_craft.py         Procedural generator that produced the .craft
 tools/check_kos.py           Static checker for the .ks scripts - run before flying
 docs/BUILD_GUIDE.md          Part-by-part manifest + manual rebuild instructions
 docs/FLIGHT_MANUAL.md        Action groups + how to fly it (auto or by hand)
 docs/DESIGN.md               Mass & ΔV budget, ascent profile, design rationale
+docs/RENDEZVOUS.md           How the rendezvous is planned, flown and verified
 docs/*_REVIEW.md             Flight-data reviews - where the tuned constants came from
 ```
 
@@ -75,7 +77,7 @@ Then open the **SPH** (Space Plane Hangar) and load *Mk3 Titan Heavy SSTO*.
 **2. The kOS scripts** — copy them onto the kOS *Archive* volume:
 
 ```
-cp scripts/ascent.ks scripts/deorbit_land.ks  "<KSP>/Ships/Script/"
+cp scripts/ascent.ks scripts/rendezvous.ks scripts/deorbit_land.ks  "<KSP>/Ships/Script/"
 ```
 
 (`Ships/Script/` is kOS's archive folder — it's the `0:` volume in the terminal.)
@@ -108,9 +110,21 @@ cp scripts/ascent.ks scripts/deorbit_land.ks  "<KSP>/Ships/Script/"
    The script is generic: it flies any RAPIER spaceplane capable of reaching
    orbit, not just this one. See the [flight manual](docs/FLIGHT_MANUAL.md) for
    how it picks its profile and what to trim if a flight comes up short.
-4. Do your mission (dock at your station via the dorsal shielded port, drop
-   cargo, etc.).
-5. Come home:
+4. Meet your station:
+   ```
+   RUN rendezvous.                   // whatever is selected on the map
+   RUN rendezvous("Station Alpha").  // or by name - a substring is enough
+   ```
+   It acquires the target, prices the **whole** rendezvous against what is in
+   the tanks (plane change, phasing, transfer, approach, and the deorbit reserve
+   it refuses to spend), logs the resources aboard, and gives a GO / MARGINAL /
+   NOT ENOUGH verdict before it moves. Then it matches the plane, **solves** a
+   phasing orbit rather than waiting for a lead angle that may never come,
+   transfers, corrects, kills the relative velocity, and parks a few hundred
+   metres off the target at a closing speed it can actually stop from. It does
+   not dock — see [`docs/RENDEZVOUS.md`](docs/RENDEZVOUS.md).
+5. Do your mission (dock via the dorsal shielded port, drop cargo, etc.).
+6. Come home:
    ```
    RUN deorbit_land.
    ```
