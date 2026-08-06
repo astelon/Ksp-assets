@@ -165,6 +165,13 @@ powered aeroplane is flown:
   profile, level otherwise, and never a climb above `POWER_CEILING` (7 km),
   because a ship short of the runway cannot climb its way there.
 
+> **Superseded by `docs/PATH_REVIEW.md`.** "Level otherwise" is the half of this
+> that was wrong, and the next flight found it: a ship holding level flight is a
+> ship whose energy profile sinks away underneath it as the range closes. The
+> nose now holds a sink rate taken from the energy error, powered or not, and
+> `POWER_CLIMB_VS` / `POWER_SINK_VS` / `POWER_CEILING` are gone with the second
+> control law they belonged to.
+
 The diversion is stricter still. It is a landing, so it descends: thrust buys
 speed, and only while the vertical speed is negative. Final approach gets the same
 treatment — thrust for a low or slow approach, cut the moment the ship is above
