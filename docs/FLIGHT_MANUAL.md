@@ -282,11 +282,13 @@ the top of it, and `docs/REENTRY_REVIEW.md` is the flight that proves why:
 
 * **The envelope.** Every phase hands its heading and AoA demand to `setNav()`,
   which folds the heading into the airstream on a speed schedule — 25° of lean
-  while hypersonic, opening to 60° once subsonic — limits bank on the same
-  schedule, and takes bank to **zero** at the stall. Bounding the command costs
-  nothing: the demand is re-referenced to the current airstream every pass, so
-  the ship still comes round to any heading asked for, it just flies the turn
-  instead of snapping the nose to the answer.
+  while hypersonic, 15° once subsonic — limits bank on the same schedule, and
+  takes bank to **zero** at the stall. That limit is *sideslip*, not turn rate:
+  the bank commanded from the same error does the turning and costs no sideslip
+  at all, so a tight yaw bound slows no turn down. Bounding the command costs
+  nothing either way — the demand is re-referenced to the current airstream every
+  pass, so the ship still comes round to any heading asked for, it just flies the
+  turn instead of snapping the nose to the answer.
 * **Recovery outranks navigation.** With less than `STALL_Q` of dynamic pressure
   under the wing, or with the nose more than `DEPART_AOA` off the airstream for
   three seconds, the ship is not flying and no amount of navigation fixes that:
@@ -326,18 +328,26 @@ the top of it, and `docs/REENTRY_REVIEW.md` is the flight that proves why:
   glide law is what the old "whichever comes first" rule did, and it cost a ship.
 * **Glide** aims at a *final approach fix* `FINAL_DIST` short of the threshold on
   the extended centreline, not at the threshold itself — a bearing-only homing
-  law arrives overhead still high and pointing anywhere. Speed is flown on the
-  nose (AoA), the flight path on drag and track length: airbrakes and ±
-  `STURN_OFFSET` S-turns when above the `PLAN_LD` profile *and* with `MANEUVER_Q`
-  of air under the wing, and inside `HOLD_RADIUS` excess height is spiralled off over
-  the field. Short of profile **or** slow, with `USE_JETS_SHORT` set, the RAPIERs
-  go back to **air-breathing** and push — armed on pressure as well as on the
-  profile, so the thrust arrives while it is still worth something. With them lit
-  the two control laws swap ends: the throttle holds the speed and the nose holds
-  the vertical speed, capped at `POWER_CLIMB_VS` and never above `POWER_CEILING`.
-  Flying the glider law under thrust is what makes an autopilot climb at full
-  throttle until the tanks are dry — the nose is already holding the target
-  speed, so every newton goes into altitude.
+  law arrives overhead still high and pointing anywhere. The nose flies a **sink
+  rate** — the glide ratio the energy error asks for, `LD_DUMP` steep when high
+  and `LD_STRETCH` shallow when short, `PLAN_LD` on profile — with the speed
+  error trimming it. A nose that only ever holds a speed holds no flight path at
+  all, and a ship handed that command phugoids between a 45° dive and a level
+  cruise. Drag and track length spend the rest: airbrakes above `BOARD_MARGIN`
+  and ± `STURN_OFFSET` S-turns above `HIGH_MARGIN`, both only with `MANEUVER_Q`
+  of air under the wing, and inside `HOLD_RADIUS` excess height is spiralled off
+  over the field. Short of profile by `LOW_MARGIN`, with `USE_JETS_SHORT` set,
+  the RAPIERs go back to **air-breathing** and push — the throttle holds the
+  speed, the nose goes on holding the flight path. Thrust needs a real energy
+  deficit, a wing that has genuinely stopped flying, or the ground: a ship that
+  is merely slow and high is answered by pointing the nose down, not by burning
+  the reserve to hold it up there.
+* **Terrain.** Every number in the energy plan is referenced to the runway, and
+  height above the runway is not height above the ground — the approach from the
+  west crosses ridges over 2 km high. Radar altitude bounds the commanded sink
+  (`TERRAIN_FLOOR`, bled off over `TERRAIN_TAU`, a commanded `TERRAIN_CLIMB`
+  below it), floors every stall recovery, and below `TERRAIN_ABORT` ends the
+  glide outright. It outranks the plan, because the plan cannot see.
 * **Final** flies nose-for-speed, boards-for-glideslope — the way a glider is
   flown — with a localiser term (`LOC_GAIN`, `LOC_MAX`) closing on the
   centreline, wings level below 120 m, then the flare at `FLARE_ALT`.
@@ -407,12 +417,15 @@ The landing tunables worth knowing if a reentry goes wrong:
 | `RECOVER_NOSE` / `STEADY_TIME` | 20° / 6 s | A recovery ends when the wing has air **and** the nose is following the airstream, and no turn is demanded for `STEADY_TIME` afterwards. Ending on pressure alone is how one stall becomes six. |
 | `COAST_WARP_MIN` / `COAST_LEAD` | 60 / 30 s | The coast from the deorbit burn to the interface is solved and warped away when it is longer than the first; warp ends the second before the air. |
 | `JET_ARM_ALT` | 12 km | Ceiling for a jet save. Below it the jets light on low pressure under the wing *or* on being below profile. |
-| `YAW_SPD_HI` / `YAW_SPD_LO` / `YAW_SUB_MAX` | 1200 / 250 m/s / 60° | The heading-authority schedule: pinned to `ENTRY_YAW_MAX` above the first, opened to `YAW_SUB_MAX` below the second. |
+| `YAW_SPD_HI` / `YAW_SPD_LO` / `YAW_SUB_MAX` | 1200 / 250 m/s / 15° | The **sideslip** schedule: pinned to `ENTRY_YAW_MAX` above the first, opened to `YAW_SUB_MAX` below the second. The bank commanded from the same heading error is what turns the ship, so this can be tight without costing turn rate. At 60° it was not a bound at all — a 40° S-turn demand departed the ship at 58° off the airstream. |
 | `GLIDE_Q` | 0.07 atm | The dynamic pressure the glide is flown at. **This is the glide speed** — constant q is constant lift coefficient, which is best-glide at every altitude: 110 m/s over the runway, 160 at 6 km, 250 at 12 km, 450 at 20 km. |
 | `GLIDE_SPD_MIN` / `GLIDE_SPD_MAX` | 110 / 450 m/s | The ends of the range that answer is allowed to come out in. |
 | `APPR_SPEED` | 110 m/s | Target airspeed on final, where `GLIDE_Q` and 110 m/s are the same thing. |
-| `POWER_CEILING` / `POWER_CLIMB_VS` | 7 km / 5 m/s | Under thrust the throttle holds the speed and the nose holds the vertical speed. These bound the climb: a ship short of the runway cannot climb its way there. |
-| `THROT_PER_MS` / `THROT_MIN_PWR` | 0.02 / 0.25 | Powered speed loop: throttle per m/s of error, and the throttle held with the speed on target. |
+| `LD_DUMP` / `LD_STRETCH` | 1.5 / 6.0 | The glide ratios the nose is asked to *fly* at `HIGH_MARGIN` above and `LOW_MARGIN` below the profile, interpolated through `PLAN_LD` on it. This is what makes the glide track a profile instead of phugoiding around one. |
+| `GLIDE_VS_GAIN` / `GLIDE_VS_AUTH` | 0.15°/m/s / 6° | Sink-rate loop gain, and the most AoA it may add or take. Raise the gain for tighter path tracking, lower it if the nose hunts; the stall guard still outranks both. |
+| `BOARD_MARGIN` / `BOARD_OFF` | 500 / 150 m | Energy height above profile that puts the boards out, and below which they come back in. Narrower than `HIGH_MARGIN`: drag is the cheapest energy dump there is, so it is spent first and the S-turn is held back. |
+| `THROT_PER_MS` / `THROT_MIN_PWR` | 0.02 / 0.25 | Powered speed loop: throttle per m/s of error, and a spool-up floor held only while genuinely short of energy or low over the ground. There is no floor for a ship that is slow and *high*. |
+| `TERRAIN_FLOOR` / `TERRAIN_TAU` / `TERRAIN_CLIMB` / `TERRAIN_ABORT` | 500 m / 12 s / 8 m/s / 250 m | Radar-altitude clearance. The sink command is bled to nothing as the ship closes on the floor and becomes a climb below it; `TERRAIN_ABORT` ends the glide. The only numbers in the script that know the ground is there. |
 | `AOA_PER_MS` | 0.05°/m/s | Speed-loop gain. Raise for a tighter speed hold, lower if the nose hunts. |
 | `PLAN_LD` | 4.5 | Glide ratio the energy plan assumes. Too optimistic and the ship lands short; too pessimistic and it S-turns the whole way home. The glide profile it defines is compared against the ship's **energy height**, not its altitude — a ship at 5 km doing Mach 2 is long, not low. |
 | `HIGH_MARGIN` / `LOW_MARGIN` | 1500 / 400 m | Deadband either side of the profile before energy is dumped or the jets are lit. |
