@@ -14,6 +14,10 @@ mechanical enough to spot from the text alone:
   2. Unbalanced braces and parentheses.
   3. Calls to functions that are never defined, and calls with the wrong
      number of arguments.
+  4. Backslash-escaped quotes in string literals.  kOS has no escape
+     character, so \" closes the string instead of embedding a quote, and
+     the error it eventually reports points at the next word rather than at
+     the backslash.
 
 Usage:  python3 tools/check_kos.py scripts/*.ks
 Exit status is 1 if anything was reported, so it drops into a git hook or CI.
@@ -99,6 +103,39 @@ def strip_noise(src):
     return "".join(out)
 
 
+def check_escapes(src, problems):
+    """Flag backslash-escaped quotes, which kOS does not have.
+
+    The lexer's string rule is `@?"(""|[^"])*"` - the only way to embed a
+    quote is to double it, and a backslash is an ordinary character.  So
+    `PRINT "RUN foo(\"bar\")."` ends its string at the first \", leaves
+    `bar` sitting in the middle of a statement, and the compiler reports an
+    unexpected token some way past the real mistake.  Takes the raw source,
+    not the strip_noise() output, because that is what the quoting is in.
+    """
+    lineno, in_str, i = 1, False, 0
+    while i < len(src):
+        ch = src[i]
+        if ch == "\n":
+            lineno += 1
+            i += 1
+            continue
+        if ch == '"':
+            in_str = not in_str
+            i += 1
+            continue
+        if in_str and ch == "\\" and src[i + 1:i + 2] == '"':
+            problems.append((lineno, 'backslash-escaped quote in a string literal - '
+                                     'kOS has no escape character; double it ("") instead'))
+            i += 2
+            continue
+        if not in_str and src[i:i + 2] == "//":
+            while i < len(src) and src[i] != "\n":
+                i += 1
+            continue
+        i += 1
+
+
 def declarations(body):
     """Yield (line_number, name, kind, is_hard_declaration)."""
     for lineno, line in enumerate(body.split("\n"), 1):
@@ -160,9 +197,11 @@ def check_functions(body, problems):
 
 def check_file(path):
     with open(path) as handle:
-        body = strip_noise(handle.read())
+        raw = handle.read()
+    body = strip_noise(raw)
 
     problems = []
+    check_escapes(raw, problems)
     for lineno, name, kind, hard in declarations(body):
         low = name.lower()
         if low in FUNCS:

@@ -911,7 +911,10 @@ IF targetName = "" {
     PRINT "Target taken from the map selection: " + tgtVes:NAME.
   } ELSE {
     PRINT "!! No target. Select one on the map, or name it:".
-    PRINT "   RUN rendezvous(\"Station Alpha\").".
+    // kOS has no escape character in string literals: a backslash is just a
+    // backslash, so \" ends the string early and the file fails to compile.
+    // A literal double quote is written by doubling it.
+    PRINT "   RUN rendezvous(""Station Alpha"").".
     handBack().
     PRINT "Nothing to rendezvous with - stopping.".
   }
@@ -932,15 +935,15 @@ IF targetName = "" {
   } ELSE IF partial:LENGTH = 1 {
     SET tgtVes TO partial[0].
     SET tgtFound TO TRUE.
-    PRINT "Matched \"" + targetName + "\" to " + tgtVes:NAME + ".".
+    PRINT "Matched """ + targetName + """ to " + tgtVes:NAME + ".".
   } ELSE IF partial:LENGTH > 1 {
     // Guessing between two stations is how a ship ends up rendezvousing with
     // the wrong one after a two-hour phasing wait.  Say what was found instead.
-    PRINT "!! \"" + targetName + "\" is ambiguous - " + partial:LENGTH + " matches:".
+    PRINT "!! """ + targetName + """ is ambiguous - " + partial:LENGTH + " matches:".
     FOR ves IN partial { PRINT "     " + ves:NAME. }
     PRINT "   Give more of the name, or select it on the map and RUN rendezvous.".
   } ELSE {
-    PRINT "!! No vessel matching \"" + targetName + "\" is in flight.".
+    PRINT "!! No vessel matching """ + targetName + """ is in flight.".
   }
   IF NOT tgtFound { handBack(). }
 }
