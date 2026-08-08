@@ -336,12 +336,26 @@ the top of it, and `docs/REENTRY_REVIEW.md` is the flight that proves why:
   cruise. Drag and track length spend the rest: airbrakes above `BOARD_MARGIN`
   and ± `STURN_OFFSET` S-turns above `HIGH_MARGIN`, both only with `MANEUVER_Q`
   of air under the wing, and inside `HOLD_RADIUS` excess height is spiralled off
-  over the field. Short of profile by `LOW_MARGIN`, with `USE_JETS_SHORT` set,
-  the RAPIERs go back to **air-breathing** and push — the throttle holds the
-  speed, the nose goes on holding the flight path. Thrust needs a real energy
-  deficit, a wing that has genuinely stopped flying, or the ground: a ship that
-  is merely slow and high is answered by pointing the nose down, not by burning
-  the reserve to hold it up there.
+  over the field. With `USE_JETS_SHORT` set the RAPIERs go back to
+  **air-breathing** and push — the throttle holds the speed, the nose goes on
+  holding the flight path. Thrust needs a real energy deficit, a wing that has
+  genuinely stopped flying, or the ground: a ship that is merely slow and high is
+  answered by pointing the nose down, not by burning the reserve to hold it up
+  there.
+* **Rationing.** The fuel is budgeted twice over, because thrust on final cannot
+  be substituted for by anything and thrust at 60 km out usually can.
+  * **The arming line is the stretch line, not the plan line.** Being below the
+    `PLAN_LD` profile is not the same as being unable to get there — flown at
+    `LD_STRETCH` the same energy covers a third more ground, which is 4.4 km of
+    energy height at 80 km out and 370 m at 10 km. That difference is the
+    airframe's own reserve, and the nose gets first refusal on it: it shallows
+    toward `LD_STRETCH` by itself, and the jets light only when even that will
+    not reach. The line converges on the plan as the range closes, so the glide
+    is free early and the fuel is there late.
+  * **`JET_RESERVE_FRAC` of the fuel aboard at handover is the approach's**, and
+    the glide cannot reach it. `finalApproach()`, `emergencyLanding()` and
+    `stallRecover()` can — they are the cases where thrust has no substitute.
+    The closing report says whether the reserve survived.
 * **Terrain**, in two layers, because they answer different questions. Every
   number in the energy plan is referenced to the runway, and height above the
   runway is not height above the ground — the approach from the west crosses
@@ -439,7 +453,8 @@ The landing tunables worth knowing if a reentry goes wrong:
 | `LD_DUMP` / `LD_STRETCH` | 1.5 / 6.0 | The glide ratios the nose is asked to *fly* at `HIGH_MARGIN` above and `LOW_MARGIN` below the profile, interpolated through `PLAN_LD` on it. This is what makes the glide track a profile instead of phugoiding around one. |
 | `GLIDE_VS_GAIN` / `GLIDE_VS_AUTH` | 0.15°/m/s / 6° | Sink-rate loop gain, and the most AoA it may add or take. Raise the gain for tighter path tracking, lower it if the nose hunts; the stall guard still outranks both. |
 | `BOARD_MARGIN` / `BOARD_OFF` | 500 / 150 m | Energy height above profile that puts the boards out, and below which they come back in. Narrower than `HIGH_MARGIN`: drag is the cheapest energy dump there is, so it is spent first and the S-turn is held back. |
-| `THROT_PER_MS` / `THROT_MIN_PWR` | 0.02 / 0.25 | Powered speed loop: throttle per m/s of error, and a spool-up floor held only while genuinely short of energy or low over the ground. There is no floor for a ship that is slow and *high*. |
+| `THROT_PER_MS` / `THROT_MIN_PWR` | 0.02 / 0.25 | Powered speed loop: throttle per m/s of error, and a spool-up floor held only while genuinely below the arming line or low over the ground. There is no floor for a ship that is slow and *high*. |
+| `JET_RESERVE_FRAC` | 0.35 | Fraction of the LiquidFuel aboard at glide handover that the glide may **not** spend. It belongs to the final approach, the flare and any late correction — the parts of the flight where thrust has no substitute. Raise it if the ship keeps arriving at the fix with nothing left; lower it if it lands with the reserve untouched *and* the glide was fighting to reach the field. `JET_MIN_LF` (5) is the hard floor underneath, and the emergency paths can reach past the reserve. |
 | `MTN_CLEAR` / `MTN_SAMPLES` / `MTN_SCAN_T` | 350 m / 20 / 2 s | Predictive terrain. The ground is sampled at `MTN_SAMPLES` points between the ship and the fix; the highest plus `MTN_CLEAR` is a **deck** the glide may not descend through, and the energy profile is raised to whatever holding it costs. Raise `MTN_CLEAR` if the ship skims ridges; raise `MTN_SAMPLES` if it clips one between samples (20 samples over 90 km is a point every 4.5 km). |
 | `TERRAIN_FLOOR` / `TERRAIN_TAU` / `TERRAIN_CLIMB` / `TERRAIN_ABORT` | 500 m / 12 s / 8 m/s / 250 m | Reactive terrain, on `ALT:RADAR`. The sink command is bled to nothing as the ship closes on the floor and becomes a climb below it; `TERRAIN_ABORT` ends the glide. Last guard only — it cannot see a ridge until the ridge is underneath. |
 | `AOA_PER_MS` | 0.05°/m/s | Speed-loop gain. Raise for a tighter speed hold, lower if the nose hunts. |

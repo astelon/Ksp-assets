@@ -103,11 +103,54 @@ SET gThrot TO clampVal(0, 1, THROT_MIN_PWR + (spdTgt - spd) * THROT_PER_MS).
 `THROT_MIN_PWR` is 0.25. With the speed exactly on target the ship burned 25%,
 forever, and 24% is what the log prints for thirty kilometres.
 
-**Changed.** Thrust needs a real energy deficit (`ehErr < -LOW_MARGIN`), a wing
-that has genuinely stopped flying (`STALL_Q`, not `MANEUVER_Q`), or the ground.
-The floor is spool-up and applies only in those cases; a ship that is above the
-profile gets zero throttle whatever its airspeed, because the answer to slow and
-high is to point the nose down, which the sink law now does.
+**Changed.** Thrust needs a real energy deficit, a wing that has genuinely
+stopped flying (`STALL_Q`, not `MANEUVER_Q`), or the ground. The floor is
+spool-up and applies only in those cases; a ship that is above the profile gets
+zero throttle whatever its airspeed, because the answer to slow and high is to
+point the nose down, which the sink law now does.
+
+**And the deficit is measured against the wrong line.** Being below the `PLAN_LD`
+profile is not the same as being unable to reach the field — the glide has a gear
+it has not used. Flown at `LD_STRETCH` (6.0) instead of `PLAN_LD` (4.5) the same
+energy covers a third more ground:
+
+```
+rngFAF/PLAN_LD - rngFAF/LD_STRETCH  =  rngFAF * 0.056
+```
+
+which is **4.4 km of energy height at 80 km out, and 370 m at 10 km**. That
+difference is the airframe's own reserve, and spending fuel while it is still in
+hand buys something the wing was giving away for free. So the arming line is now
+the stretch line:
+
+```
+stretchEh = FAF_AGL + APPR_SPEED^2/2g + rngFAF / LD_STRETCH
+armEh     = MAX(stretchEh, deckEh)
+```
+
+The nose gets first refusal — the sink law already shallows toward `LD_STRETCH`
+on its own as the ship goes below profile — and the jets light only when even
+that will not reach. Because the gap closes with range, the rule is permissive
+early and strict late, which is exactly the right shape: a deficit 80 km out is
+recoverable by flying better, a deficit 10 km out is not. The deck is inside
+`armEh`, because a ridge has to be paid for at any glide ratio.
+
+**And the glide does not get all the fuel.** `JET_RESERVE_FRAC` (0.35) of
+whatever is aboard when the glide begins is the *approach's*, and the glide
+cannot touch it:
+
+```
+gLfFloor = JET_MIN_LF + JET_RESERVE_FRAC * resAmt("LiquidFuel")   // at handover
+powered  = ... AND resAmt("LiquidFuel") > gLfFloor
+```
+
+`finalApproach()`, `emergencyLanding()` and `stallRecover()` still gate on
+`JET_MIN_LF` and can reach past it — those are the cases where thrust has no
+substitute. Proportional rather than absolute so it degrades gracefully: 35% of
+a little is a little. The glide announces when it crosses the stretch line in
+either direction and when the allowance runs out, and the closing report says
+whether the reserve survived — "most of the fuel went somewhere" should never
+have to be reverse-engineered from a log.
 
 ## 3. The ground is not at runway elevation
 
@@ -262,6 +305,13 @@ commanded to fly sideways.
    energy height long. With the split capability model the entry should dump more
    and hand over nearer 1.0; if it now hands over *short*, `ENTRY_RANGE` (800 km)
    is the number to lower, not `ENTRY_LD`.
-9. **Fuel remaining in the closing report.** The 24%-for-30-km burn should be
-   gone entirely. Any significant jet time with the `energy` pair showing the
-   ship at or above profile is a regression in the arming logic.
+9. **Fuel remaining in the closing report**, and the reserve line under it. The
+   24%-for-30-km burn should be gone entirely, and the report should read
+   `Approach reserve intact`. Any significant jet time with the `energy` pair
+   showing the ship at or above profile is a regression in the arming logic.
+10. **The `jets lit` / `jets off` pair, and `glide allowance spent`.** Zero of
+    these on a clean flight is the ideal — it means the ship glided the whole way
+    on the airframe's own stretch margin. One pair late in the glide is the
+    system working as designed. `glide allowance spent` means the glide used its
+    entire 65% and the approach is flying on the reserve: that is a signal to
+    look at `PLAN_LD` and `ENTRY_RANGE`, not to raise `JET_RESERVE_FRAC`.

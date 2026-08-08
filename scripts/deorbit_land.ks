@@ -65,6 +65,17 @@
 //  - and thrust is spent only on a real energy deficit, never on a ship that is
 //  merely slow and high.  The answer to slow and high is to point the nose down.
 //
+//  RATION - and even a real deficit is not automatically the fuel's problem.
+//  The glide has a gear it has not used: flown at LD_STRETCH instead of PLAN_LD
+//  the same energy covers a third more ground, which is 4.4 km of energy height
+//  at 80 km out and 370 m at 10 km.  That difference is the airframe's own
+//  reserve, and burning fuel while it is still in hand buys something the wing
+//  was giving away.  So the jets arm against the *stretch* line, not the plan
+//  line - the nose shallows first and the jets light only when even that will
+//  not reach - and JET_RESERVE_FRAC of the fuel aboard at handover is the
+//  approach's, which the glide cannot touch at all.  Thrust on final cannot be
+//  substituted for by anything; thrust at 60 km out usually can.
+//
 //  GROUND - every number in the energy plan is referenced to the runway, and
 //  height above the runway is not height above the ground.  The approach to the
 //  KSC from the west crosses ridges over 2 km high, so a descent that is exactly
@@ -297,6 +308,14 @@ SET TOUCHDOWN_ALT  TO 3.         // radar altitude considered "on the wheels" (m
 SET USE_JETS_SHORT TO TRUE.      // relight the jets rather than land short
 SET JET_ARM_ALT    TO 12000.     // only below this altitude is a jet save attempted (m)
 SET JET_MIN_LF     TO 5.         // never light the jets on less LiquidFuel than this
+// The glide does not get all of it.  Whatever LiquidFuel is aboard when the
+// glide begins, this fraction of it is the approach's and the glide may not
+// touch it: the final approach, the flare and any late correction are the part
+// of the flight where thrust cannot be substituted for by anything else, and a
+// glide that has spent everything arrives at the fix with no way to fix
+// anything.  Proportional rather than absolute so it degrades gracefully - 35%
+// of a little is a little, and JET_MIN_LF is the hard floor underneath.
+SET JET_RESERVE_FRAC TO 0.35.    // fraction of the fuel at handover reserved for the approach
 
 // ---------------------------------------------------------------------------
 //  Body / physical constants (cached once)
@@ -1363,6 +1382,15 @@ SET gLdEh   TO 0.
 SET gLdRng  TO 0.
 SET gLdNext TO TIME:SECONDS + LD_SAMPLE.
 
+// Ration the fuel before spending any of it.  The glide gets what is left over
+// the reserve; the approach gets the reserve, and the glide cannot reach it.
+SET gLfFloor TO JET_MIN_LF + JET_RESERVE_FRAC * resAmt("LiquidFuel").
+SET gJetLit  TO FALSE.
+SET gJetSaid TO 0.
+PRINT "  Jet fuel: " + ROUND(resAmt("LiquidFuel")) + " LF - " +
+      ROUND(MAX(0, resAmt("LiquidFuel") - gLfFloor)) + " for the glide, " +
+      ROUND(gLfFloor) + " held for the approach.".
+
 UNTIL (groundRange(FAF) < FAF_CAPTURE AND SHIP:ALTITUDE - RWY_ELEV < FAF_AGL + 1000)
       OR SHIP:ALTITUDE - RWY_ELEV < GLIDE_FLOOR
       OR ALT:RADAR < TERRAIN_ABORT {
@@ -1512,17 +1540,50 @@ UNTIL (groundRange(FAF) < FAF_CAPTURE AND SHIP:ALTITUDE - RWY_ELEV < FAF_AGL + 1
     // MANEUVER_Q, which every stall recovery satisfies, so a ship six kilometres
     // of energy height LONG came out of a recovery with the jets lit; and the
     // throttle then held a THROT_MIN_PWR floor whenever they were armed, so it
-    // burned the reserve at 24% for 30 km holding 190 m/s level at 8 km.  Thrust
-    // now needs a real energy deficit, a wing that has genuinely stopped flying,
-    // or the ground.
-    IF ehErr < -LOW_MARGIN OR SHIP:DYNAMICPRESSURE < STALL_Q OR lowGnd {
+    // burned the reserve at 24% for 30 km holding 190 m/s level at 8 km.
+    //
+    // It also armed against the wrong line.  Being below the PLAN_LD profile is
+    // not being unable to get there - the glide has a gear it has not used yet.
+    // Flown at LD_STRETCH instead of PLAN_LD the same energy covers a third more
+    // ground, and that difference *is* the ship's own reserve: 4.4 km of energy
+    // height at 80 km out, 370 m at 10 km.  Spending fuel while that is still in
+    // hand is buying something the airframe was giving away.
+    //
+    // So the arming line is the stretch line, not the plan line, and the nose
+    // gets first refusal: it shallows toward LD_STRETCH on its own, and only
+    // when even that will not reach do the jets light.  The line converges on
+    // the plan as the range closes, which is the behaviour asked for - glide the
+    // early part where a deficit is recoverable, keep the fuel for the end where
+    // it is not.  The deck is inside it, because a ridge has to be paid for
+    // whatever the glide ratio.
+    LOCAL stretchEh IS FAF_AGL + APPR_SPEED * APPR_SPEED / (2 * G0)
+                       + rngFAF / LD_STRETCH.
+    LOCAL armEh IS MAX(stretchEh, deckEh).
+    IF ehNow < armEh OR SHIP:DYNAMICPRESSURE < STALL_Q OR lowGnd {
       SET gPowerOn TO TRUE.
-    } ELSE IF ehErr > 0 AND SHIP:DYNAMICPRESSURE > RECOVER_Q {
+    } ELSE IF ehNow > armEh + LOW_MARGIN AND SHIP:DYNAMICPRESSURE > RECOVER_Q {
       SET gPowerOn TO FALSE.
     }
     LOCAL powered IS gPowerOn AND USE_JETS_SHORT
-                     AND resAmt("LiquidFuel") > JET_MIN_LF
+                     AND resAmt("LiquidFuel") > gLfFloor
                      AND SHIP:ALTITUDE < JET_ARM_ALT.
+
+    // Say what the rationing is doing.  "Most of the fuel went somewhere" is not
+    // a thing a log should ever have to be reverse-engineered for.
+    IF powered <> gJetLit AND TIME:SECONDS > gJetSaid {
+      SET gJetLit  TO powered.
+      SET gJetSaid TO TIME:SECONDS + 5.
+      IF powered {
+        PRINT "  ** below the stretch line - jets lit, " +
+              ROUND(MAX(0, resAmt("LiquidFuel") - gLfFloor)) + " LF of allowance left.".
+      } ELSE IF resAmt("LiquidFuel") <= gLfFloor {
+        PRINT "  ** glide allowance spent - gliding from here, " +
+              ROUND(resAmt("LiquidFuel")) + " LF held for the approach.".
+      } ELSE {
+        PRINT "  ** back above the stretch line - jets off, " +
+              ROUND(MAX(0, resAmt("LiquidFuel") - gLfFloor)) + " LF of allowance left.".
+      }
+    }
 
     IF powered {
       // Under thrust the two control laws swap ends: the throttle holds the
@@ -1533,7 +1594,7 @@ UNTIL (groundRange(FAF) < FAF_CAPTURE AND SHIP:ALTITUDE - RWY_ELEV < FAF_AGL + 1
       // short; there is no floor for a ship that is merely slow and high,
       // because the answer to slow and high is to point the nose down.
       SET gThrot TO clampVal(0, 1, (spdTgt - spd) * THROT_PER_MS).
-      IF ehErr < -LOW_MARGIN OR SHIP:DYNAMICPRESSURE < STALL_Q OR lowGnd {
+      IF ehNow < armEh OR SHIP:DYNAMICPRESSURE < STALL_Q OR lowGnd {
         SET gThrot TO MAX(gThrot, THROT_MIN_PWR).
       } ELSE IF ehErr > 0 {
         SET gThrot TO 0.
@@ -1669,5 +1730,16 @@ IF rngEnd > 3000 {
 PRINT "  Ground range to runway threshold: " + ROUND(rngEnd) + " m".
 PRINT "  Fuel remaining -- LiquidFuel: " + ROUND(resAmt("LiquidFuel")) +
       " , Oxidizer: " + ROUND(resAmt("Oxidizer")).
+// Whether the rationing held.  Landing with the reserve intact means the glide
+// paid its own way and the fuel was there if the approach had needed it; landing
+// well under it means the approach itself was expensive, and the number to look
+// at next is the profile that delivered the ship to the fix, not the reserve.
+IF resAmt("LiquidFuel") >= gLfFloor {
+  PRINT "  Approach reserve intact (" + ROUND(gLfFloor) + " LF held, " +
+        ROUND(resAmt("LiquidFuel")) + " left).".
+} ELSE {
+  PRINT "  Approach reserve dipped into by " +
+        ROUND(gLfFloor - resAmt("LiquidFuel")) + " LF of " + ROUND(gLfFloor) + ".".
+}
 IF SHIP:STATUS = "LANDED" AND rngEnd < 3000 { PRINT "  Welcome home.". }
 PRINT "======================================================".
