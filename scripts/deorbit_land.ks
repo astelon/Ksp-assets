@@ -85,6 +85,41 @@
 //  every stall recovery, and below TERRAIN_ABORT it ends the glide outright.
 //  It outranks the plan, because the plan cannot see.
 //
+//  REACH - a plan the ship cannot check is a plan it will believe past the last
+//  moment it could have acted on.  The reference entry read `energy 1.98` - two
+//  runways' worth of surplus - continuously from 47 km to 21 km, while it was in
+//  fact tumbling, and then handed the glide a ship 25 km of energy height SHORT
+//  at 21 km with 271 km to fly.  Two things were lying.  The measured L/D was
+//  sampled from the interface down, where there is no air: a ship at 60 km
+//  covers 10 km of ground per sample while spending almost no energy, which
+//  reads as an L/D of 10, and the filter then takes minutes to walk that back
+//  down to the 1.1 the airframe was really flying.  And the altitude half of the
+//  energy budget was priced at PLAN_LD, the *glider's* ratio, when 40 km of
+//  altitude is not glider energy at all - the wing cannot fly at 4.5 to 1 in air
+//  that thin, and that height has to be spent getting down to where it can.  So
+//  the L/D is only measured where there is enough air to measure it (LD_MIN_Q),
+//  and the budget is split at GLIDE_CEIL instead of at a speed.  The same flight
+//  then reads short at 40 km and 366 km out, with the whole entry left to fix it
+//  in.  See docs/REACH_REVIEW.md.
+//
+//  SOMEWHERE ELSE - and when it cannot be fixed, that is a decision, not a
+//  failure to be discovered on the radar altimeter.  The old script had exactly
+//  one place where it noticed it was not going home: GLIDE_FLOOR, 600 m above
+//  the runway, at which point it printed the range it had missed by and landed
+//  wherever the nose happened to be pointing.  Everything before that was spent
+//  flying at a runway that had been out of reach for four minutes - and worse,
+//  holding a terrain deck it had no energy to hold, which is a stall order
+//  repeated until the ground arrives.  The reference flight phugoided against a
+//  3 656 m deck at 3.9 km - stall at 82 m/s, dive, recover at 121, climb, stall
+//  - all the way into the mountains 150 km out.  The glide therefore keeps a
+//  live answer to "can I still get there", and when the answer is no for
+//  DIVERT_COMMIT seconds running it *chooses* somewhere it can reach: a site
+//  scored on how flat the ground actually is, with open water counted as the
+//  flat option it is, and with a run-in heading picked from the terrain rather
+//  than from wherever the ship was pointing when it ran out of height.  The
+//  divert is not final - it is re-tested every pass, and the runway is taken
+//  back the moment it comes into reach again.
+//
 //  IMPORTANT - this is a *guidance* script, not a precision lander.  A
 //  spaceplane's huge glide range absorbs deorbit-timing error, but the
 //  constants below (deorbit lead angle, glide AoA, planned L/D, flare height)
@@ -123,10 +158,24 @@ SET DEORBIT_PE     TO 32000.     // target periapsis for the deorbit burn (m)
 // not.  Both are inside what the energy loop can steer with, which is the point
 // - a schedule the ship cannot correct from either side is not a schedule.
 //
+// The third flight settles it downward.  Interface at 811 km, on the schedule
+// 800 km asks for, and the ship stopped 150.6 km short of the threshold: 660 km
+// of achieved range, not 880.  Some of that deficit was the entry tumbling (see
+// the ENTRY_AOA_NOM note below) and is being fixed on its own, but not all of it
+// - 800 km has now been asked for three times and delivered once, and a schedule
+// that is wrong on the short side has no correction available to it.  Long does:
+// boards, alpha, S-turns and, in the last 8 km, a spiral.
+//
+// 700 km is therefore where this sits.  It is the measured 660 plus a little of
+// the range the entry fixes should hand back, and it leaves ~180 km of dumping
+// authority against the clean-flight figure - which is the side of the schedule
+// that has a control on it.
+//
 // Trim rule: crossing the field with energy to spare means the ship out-flew
 // this number, so raise it; landing short means lower it.  100 km is 9.5 deg of
 // Kerbin ground track, so the steps are big and one flight tells you which way.
-SET ENTRY_RANGE    TO 800000.    // ground range from the interface to the KSC (m)
+// The end-of-flight report prints the signed miss and the direction to trim.
+SET ENTRY_RANGE    TO 700000.    // ground range from the interface to the KSC (m)
 
 // Ground-track angle before the KSC at which the burn is started.  Left at 0 it
 // is *solved* from ENTRY_RANGE and the coast arc the deorbit ellipse will sweep
@@ -154,7 +203,21 @@ SET COAST_WARP_MIN TO 60.        // only warp the coast when it is longer than t
 SET COAST_LEAD     TO 30.        // come out of warp this long before the interface (s)
 
 // --- Tunables: reentry ------------------------------------------------------
-SET REENTRY_AOA    TO 40.        // AoA held while hypersonic (deg above the airstream)
+// REENTRY_AOA is the *dump* attitude, not the cruise one, and flying it as the
+// default is what the last flight did wrong before it did anything else.  Told
+// to hold 40 deg at 2 092 m/s the ship went to 46, then 51, then 66, then 70 deg
+// off the airstream and departed - five times between 70 km and 21 km, each
+// departure destroying energy without buying a metre of ground.  40 deg with the
+// boards out is the configuration the reference data credits with 530 km of
+// range; 880 km is what the ship does flown clean.  The entry's *nominal* alpha
+// is therefore ENTRY_AOA_NOM, which the airframe can actually hold, and the
+// energy loop opens it toward REENTRY_AOA only when there is genuinely surplus
+// range to throw away.  This is also the direct answer to "stay higher, do not
+// slow down so aggressively": less alpha is less drag is a shallower, faster,
+// longer entry.
+SET REENTRY_AOA    TO 40.        // most alpha the entry will ever command (deg)
+SET ENTRY_AOA_NOM  TO 28.        // ... and what it holds when it is on its range plan
+SET ENTRY_AOA_DUMP TO 10.        // alpha added on top of nominal when long (deg)
 SET ENTRY_AOA_HI   TO 2000.      // airspeed at/above which the full AoA is held (m/s)
 SET ENTRY_AOA_LO   TO 500.       // airspeed at/below which AoA has tapered to glide AoA
 SET ENTRY_AOA_MIN  TO 12.        // least alpha the entry will fly when it is short (deg)
@@ -169,11 +232,31 @@ SET ENERGY_LONG    TO 1.15.      // range capability / range to go above which w
 SET ENERGY_SHORT   TO 1.00.      // ... and below which we are short and must stretch
 SET SKIP_VS        TO 15.        // climbing faster than this = ballooning, unload AoA
 SET RCS_Q_OFF      TO 0.02.      // dynamic pressure (atm) at which RCS is no longer needed
-SET ENTRY_HOLD_TOL TO 25.        // actual AoA this far past the command = departed (deg)
-SET ENTRY_TRIM_TOL TO 12.        // ... and this far past it = stop asking for so much (deg)
-SET ENTRY_AOA_STEP TO 2.         // AoA given up each time the ship cannot hold the command
+// The overshoot that killed the reference entry measured 24 deg past the
+// command - under the old 25 deg departure tolerance, so it was only ever
+// handled by the slow trim path, which gives back 2 deg per 2 seconds of being
+// wrong.  By the time the cap had walked 40 -> 38 the ship was 79 deg off the
+// airstream and gone.  The tolerances come in, and the give-back is now
+// proportional: an airframe that is 24 deg past a 8 deg tolerance is told to
+// stop asking for 16 deg of alpha, not for 2.
+SET ENTRY_HOLD_TOL TO 20.        // actual AoA this far past the command = departed (deg)
+SET ENTRY_TRIM_TOL TO 8.         // ... and this far past it = stop asking for so much (deg)
+SET ENTRY_AOA_STEP TO 2.         // least AoA given up when the ship cannot hold the command
 SET LD_SAMPLE      TO 5.         // seconds between measurements of the L/D actually flown
 SET LD_FILTER      TO 0.35.      // weight given to each new L/D sample
+// An L/D measured where there is no air is not a measurement of the airframe.
+// Above ~60 km the ship spends almost no energy per sample and covers 10 km of
+// ground doing it, which reads as the clamp ceiling and takes the filter minutes
+// to unwind - the single biggest reason the entry believed it was long while it
+// was tumbling.  Measure only where there is something to measure, and clamp to
+// a number this airframe could actually fly.
+SET LD_MIN_Q       TO 0.002.     // dynamic pressure (atm) below which L/D is not measured
+SET LD_MEAS_MAX    TO 6.         // highest believable measured L/D
+// Where the entry's energy stops being the entry's.  Altitude above this is not
+// glider energy: the wing cannot hold PLAN_LD in air that thin, and that height
+// has to be spent getting down to where it can.  Pricing it at the glide ratio
+// is what made 40 km of altitude look like 180 km of range that was never there.
+SET GLIDE_CEIL     TO 20000.     // altitude at/below which the planned glide is flyable (m)
 
 // --- Tunables: glide --------------------------------------------------------
 // The glide flies a dynamic pressure, not an airspeed: see the SPEED note in the
@@ -282,7 +365,18 @@ SET RECOVER_AOA    TO 2.         // AoA held while diving out of a stall (deg)
 // builds a margin.  Six cycles of recover-and-depart is what this costs.
 SET RECOVER_NOSE   TO 20.        // nose back within this of the airstream = flying (deg)
 SET RECOVER_MAX_T  TO 45.        // longest a single recovery attempt runs before re-thinking
-SET STEADY_TIME    TO 6.         // wings-level seconds granted after a recovery
+SET STEADY_TIME    TO 8.         // wings-level seconds granted after a recovery
+// What makes a recovery *violent* is not the dive - a nose held 2 deg off a
+// steep airstream is exactly what unloading the wing looks like, and it is
+// correct.  It is the heading.  flightHdg() reads the surface velocity vector,
+// and a tumbling ship's velocity vector swings through the whole compass, so
+// re-reading it every pass hands the steering manager a new bearing several
+// times a second and the ship rolls hard at each one.  The recovery therefore
+// latches the heading it began with and only walks it back toward the airstream
+// at RECOVER_HDG_RATE, and only once the nose is following the air well enough
+// for the reading to mean something.
+SET RECOVER_HDG_RATE TO 10.      // deg/s the recovery heading may be walked (deg/s)
+SET RECOVER_HDG_OK   TO 60.      // nose within this of the airstream before it is walked
 // Absolute attitude envelope, applied to every atmospheric command as a last
 // resort.  Both limits must stay clear of the attitudes the AoA law legitimately
 // asks for, or they quietly become the very thing this script exists to avoid -
@@ -317,10 +411,46 @@ SET JET_MIN_LF     TO 5.         // never light the jets on less LiquidFuel than
 // of a little is a little, and JET_MIN_LF is the hard floor underneath.
 SET JET_RESERVE_FRAC TO 0.35.    // fraction of the fuel at handover reserved for the approach
 
+// --- Tunables: choosing somewhere else to land ------------------------------
+// A glider that cannot reach the runway has to be told so while it still has the
+// height to do something about it.  These decide when the glide gives up on the
+// KSC and what it goes to instead.
+//
+// The test is `reach vs range to go`, and reach is rangeCapability() - which is
+// priced off the L/D actually being flown - plus a deliberately pessimistic
+// valuation of the jet allowance.  Pessimistic because the failure mode of an
+// optimistic one is the flight this replaces: the ship believes the fuel will
+// save it, flies at a runway it cannot reach, and spends the fuel phugoiding.
+SET DIVERT_RATIO   TO 0.90.      // reach/range below which the runway is out of reach
+SET DIVERT_CLEAR   TO 1.05.      // ... and above which it is back in reach
+SET DIVERT_COMMIT  TO 15.        // seconds of being short before a site is chosen
+SET JET_RANGE_PER_LF TO 100.     // ground range one unit of LiquidFuel is assumed to buy (m)
+
+// How the alternate is found.  Candidates are laid out ahead of the ship inside
+// what it can reach, scored on how flat the ground around them is, and the
+// flattest cheap one wins.  Open water scores as a fixed, moderate cost: it is
+// perfectly flat, which is most of what matters, but ditching a spaceplane is
+// still worse than a field, so it loses to real flat land and beats a hillside.
+SET SITE_BEARINGS  TO 2.         // candidate bearings either side of the track
+SET SITE_SPREAD    TO 25.        // degrees between those bearings
+SET SITE_RANGES    TO 3.         // candidate ranges along each bearing
+SET SITE_NEAR_FRAC TO 0.45.      // nearest candidate, as a fraction of the reach
+SET SITE_FAR_FRAC  TO 0.90.      // ... and the farthest
+SET SITE_RING      TO 1500.      // radius of the flatness ring around a candidate (m)
+SET SITE_RING_N    TO 6.         // points sampled on that ring
+SET SITE_WATER_PEN TO 250.       // roughness-equivalent cost of ditching (m)
+SET SITE_HOME_GAIN TO 0.002.     // ... and cost per metre farther from the KSC
+SET SITE_FINAL     TO 3000.      // approach fix this far short of a chosen site (m)
+SET SITE_RESCAN_T  TO 30.        // least seconds between re-picking the site
+
 // ---------------------------------------------------------------------------
 //  Body / physical constants (cached once)
 // ---------------------------------------------------------------------------
 SET G0            TO 9.80665.
+// The approach's fuel reserve, rationed for real when the glide begins.  Set
+// here as well so that anything reading it before then - jetRangeLeft() - sees a
+// number rather than an undefined identifier.
+SET gLfFloor      TO 0.
 SET BODY_MU       TO SHIP:BODY:MU.
 SET BODY_R        TO SHIP:BODY:RADIUS.
 SET BODY_ROT_RATE TO 360 / SHIP:BODY:ROTATIONPERIOD.   // deg/s, eastward
@@ -732,19 +862,32 @@ FUNCTION stallRecover {
   PRINT "  ** stalled at " + ROUND(SHIP:AIRSPEED) + " m/s (" +
         ROUND(noseOff()) + " deg off the airstream) - unloading and diving.".
   BRAKES OFF.
-  RCS ON.
   // Jets only where jets are worth their fuel.  A RAPIER at full throttle at
   // 20 km in a tumble is the deorbit reserve going out of the back of the ship.
   LOCAL jets IS USE_JETS_SHORT AND (resAmt("LiquidFuel") > JET_MIN_LF)
               AND SHIP:ALTITUDE < JET_ARM_ALT.
   LOCAL tGiveUp IS TIME:SECONDS + RECOVER_MAX_T.
+  // Start from the heading already being flown and walk it, rather than snapping
+  // to whatever the tumbling velocity vector reads this frame.
+  LOCAL hdgHold IS gHdg.
+  LOCAL tPrev   IS TIME:SECONDS.
   UNTIL (SHIP:DYNAMICPRESSURE > RECOVER_Q AND noseOff() < RECOVER_NOSE)
         OR ALT:RADAR < floorAgl
         OR TIME:SECONDS > tGiveUp
         OR SHIP:STATUS = "LANDED" OR SHIP:STATUS = "SPLASHED" {
-    SET gHdg  TO flightHdg().
+    LOCAL dt IS MAX(0, TIME:SECONDS - tPrev).
+    SET tPrev TO TIME:SECONDS.
+    IF noseOff() < RECOVER_HDG_OK {
+      LOCAL lim IS RECOVER_HDG_RATE * dt.
+      SET hdgHold TO hdgHold + clampVal(-lim, lim, normAng(flightHdg() - hdgHold)).
+    }
+    SET gHdg  TO hdgHold.
     SET gAoa  TO RECOVER_AOA.
     SET gBank TO 0.
+    // RCS is for a ship with no air over its control surfaces.  Left on into
+    // dense air it fights the aerodynamic controls and adds exactly the snatch
+    // this recovery is trying to take out.
+    IF SHIP:DYNAMICPRESSURE < RCS_Q_OFF { RCS ON. } ELSE { RCS OFF. }
     IF jets { SET gThrot TO 1. }
     WAIT 0.05.
   }
@@ -800,6 +943,18 @@ SET gLdNext TO 0.
 FUNCTION ldSample {
   PARAMETER rngToGo.
   IF TIME:SECONDS < gLdNext { RETURN. }
+  // No air, no measurement.  A sample taken across the top of the atmosphere
+  // prices orbital motion as aerodynamics: the ship spends almost no energy and
+  // covers 10 km of ground doing it, the ratio pegs at the clamp, and the filter
+  // then needs a dozen honest samples to walk it back down - by which time the
+  // entry is over.  The baselines are dropped too, so the first real sample is
+  // measured across air and not across the coast that preceded it.
+  IF SHIP:DYNAMICPRESSURE < LD_MIN_Q {
+    SET gLdEh   TO 0.
+    SET gLdRng  TO 0.
+    SET gLdNext TO TIME:SECONDS + LD_SAMPLE.
+    RETURN.
+  }
   LOCAL eh IS energyHeight().
   IF gLdEh > 0 {
     LOCAL dEh  IS gLdEh - eh.
@@ -810,8 +965,12 @@ FUNCTION ldSample {
     // fact long - the one state in which shutting the energy dumps down would be
     // exactly the wrong answer.
     IF dEh > 50 AND dRng > 0 {
-      LOCAL ldNow IS clampVal(0.3, 10, dRng / dEh).
-      IF gLdMeas <= 0 { SET gLdMeas TO ldNow. }
+      LOCAL ldNow IS clampVal(0.3, LD_MEAS_MAX, dRng / dEh).
+      // Seed against the model rather than off the first sample.  The estimate
+      // is only ever used to *lower* the capability, so the honest opening
+      // position is the pessimistic one - a single flattering first sample
+      // otherwise sets the level the filter then has to work back down from.
+      IF gLdMeas <= 0 { SET gLdMeas TO MIN(ldNow, ldNominal()). }
       ELSE { SET gLdMeas TO gLdMeas + LD_FILTER * (ldNow - gLdMeas). }
     }
   }
@@ -838,17 +997,34 @@ FUNCTION ldSample {
 // splits it - the kinetic energy above the handover speed is the entry's, and
 // everything under it is the glider's - and the same moment reads 1.52, long,
 // which is both true and actionable while there is still air to dump into.
+// Splitting it at the handover *speed* was still too generous, because it leaves
+// the whole altitude column in the glider's half.  At 40 km and Mach 5 that
+// credited 40 km of height at 4.5 to 1 - 180 km of range from air the wing
+// cannot fly in.  The glider's share is the energy it will have when it is
+// actually gliding: at GLIDE_CEIL or below, at the handover speed, and never
+// more than the ship has.  Everything above that is the entry's, and is spent at
+// the entry's measured ratio.  On the reference flight this is the difference
+// between reading 1.16 (long, keep dumping) and 0.97 (short, stop) at 40 km,
+// with four minutes of entry left to act in.
 FUNCTION rangeCapability {
-  LOCAL spd   IS SHIP:AIRSPEED.
   LOCAL ehTot IS energyHeight().
-  LOCAL ehFast IS 0.
-  IF spd > ENTRY_END_SPD {
-    SET ehFast TO MIN(ehTot,
-          (spd * spd - ENTRY_END_SPD * ENTRY_END_SPD) / (2 * G0)).
-  }
+  LOCAL ehGlide IS MIN(ehTot,
+        MAX(0, MIN(SHIP:ALTITUDE, GLIDE_CEIL) - RWY_ELEV)
+        + ENTRY_END_SPD * ENTRY_END_SPD / (2 * G0)).
+  LOCAL ehFast IS MAX(0, ehTot - ehGlide).
   LOCAL ldFast IS ldNominal().
   IF gLdMeas > 0 { SET ldFast TO MIN(ldFast, gLdMeas). }
-  RETURN ehFast * ldFast + (ehTot - ehFast) * PLAN_LD.
+  RETURN ehFast * ldFast + ehGlide * PLAN_LD.
+}
+
+// What the jet allowance is worth as ground range, for the reach test only.
+// Deliberately pessimistic: the failure this guards against is a ship that
+// believes the fuel will save it, flies at a runway it cannot reach, and spends
+// the fuel phugoiding at a terrain deck.  The reserve is not counted at all -
+// it belongs to the approach and the glide may not plan around it.
+FUNCTION jetRangeLeft {
+  IF NOT USE_JETS_SHORT { RETURN 0. }
+  RETURN MAX(0, resAmt("LiquidFuel") - gLfFloor) * JET_RANGE_PER_LF.
 }
 
 // Great-circle distance over the ground to a point, in metres.  Note this is
@@ -880,12 +1056,26 @@ FUNCTION crossTrackToRwy {
   RETURN groundRange(KSC_RWY) * SIN(normAng(KSC_RWY:HEADING - RUNWAY_HDG)).
 }
 
-// The point `dist` metres from `origin` along compass heading `hdgDeg`.
+// The point `dist` metres from `origin` along compass heading `hdgDeg`, solved
+// on the sphere rather than on a tangent plane.
+//
+// The flat version this replaces was accurate enough for what it was originally
+// asked - a final approach fix 9 km out, on the equator, where it is wrong by a
+// tenth of a metre.  It is not accurate enough for what it is asked now.  The
+// site search lays candidates out to 150 km and beyond, and the tangent-plane
+// error grows with the square of the distance *and* with latitude: 1.3 km at
+// 60 km from a 20-degree return, 8.8 km at 150, 26 km at 250.  Scoring the
+// flatness of ground eight kilometres from the place the ship is actually going
+// is not a terrain scan, it is a coincidence.
 FUNCTION geoOffset {
   PARAMETER origin, hdgDeg, dist.
-  LOCAL dLat IS dist * COS(hdgDeg) / BODY_R * CONSTANT:RADTODEG.
-  LOCAL dLng IS dist * SIN(hdgDeg) / (BODY_R * COS(origin:LAT)) * CONSTANT:RADTODEG.
-  RETURN LATLNG(origin:LAT + dLat, origin:LNG + dLng).
+  LOCAL dl  IS dist / BODY_R * CONSTANT:RADTODEG.     // angular distance, degrees
+  LOCAL la1 IS origin:LAT.
+  LOCAL la2 IS ARCSIN(clampVal(-1, 1,
+        SIN(la1) * COS(dl) + COS(la1) * SIN(dl) * COS(hdgDeg))).
+  LOCAL lo2 IS origin:LNG + ARCTAN2(SIN(hdgDeg) * SIN(dl) * COS(la1),
+                                    COS(dl) - SIN(la1) * SIN(la2)).
+  RETURN LATLNG(la2, lo2).
 }
 
 // ---------------------------------------------------------------------------
@@ -933,16 +1123,134 @@ FUNCTION scanTerrain {
   RETURN gMtnPeak.
 }
 
-// AoA schedule for the entry: the full high-alpha attitude only while there is
-// orbital energy to throw away, tapering to a flyable angle as the ship slows.
-// Holding 40 degrees all the way down is what parks a spaceplane at the top of
-// the atmosphere with no speed left and then drops it.
+// ---------------------------------------------------------------------------
+//  Choosing somewhere else to land
+//
+//  Two flights have now ended in the mountains and one in the sea, and in every
+//  case the script flew at the KSC until it ran out of height and then landed on
+//  whatever was underneath at that instant.  That is not a diversion, it is a
+//  crash with a heading hold.  A glider that knows it is 100 km short has one
+//  real decision left - *where* - and it has minutes of height in which to make
+//  it, fly to it, and arrive lined up.
+//
+//  Flatness is the whole question.  A spaceplane touching down at 100 m/s needs
+//  a couple of kilometres that do not change height much; it does not care about
+//  elevation, and it does not much care about being 30 km from anywhere.  So the
+//  score is the spread of terrain height in a ring around the point, and open
+//  water enters that scale as SITE_WATER_PEN - flat, which is most of what
+//  matters, but a ditching, which is worse than a field.
+// ---------------------------------------------------------------------------
+// Great-circle distance between two geopositions, in metres.  groundRange() is
+// the same calculation anchored at the ship; site scoring needs it between two
+// points neither of which is here.
+FUNCTION geoRange {
+  PARAMETER gA, gB.
+  LOCAL ctr IS SHIP:BODY:POSITION.
+  RETURN BODY_R * VANG(gA:POSITION - ctr, gB:POSITION - ctr) * CONSTANT:DEGTORAD.
+}
+
+// Ocean, in the only sense that matters here: the terrain at this point is below
+// sea level, so what the ship would arrive at is water.
+FUNCTION siteIsWater {
+  PARAMETER geo.
+  RETURN geo:TERRAINHEIGHT < 0.
+}
+
+// The height the ship would actually touch at - the sea surface over water,
+// the ground everywhere else.
+FUNCTION siteElev {
+  PARAMETER geo.
+  RETURN MAX(0, geo:TERRAINHEIGHT).
+}
+
+// How flat it is around a point: the spread of touch-down height over a ring of
+// radius SITE_RING.  Sub-sea samples are read at 0 rather than at the seabed,
+// which is what stops a coastal candidate being condemned for the depth of the
+// water next to it while correctly charging it for the cliff.
+FUNCTION siteRoughness {
+  PARAMETER geo.
+  LOCAL hMin IS siteElev(geo).
+  LOCAL hMax IS hMin.
+  FROM { LOCAL idx IS 0. } UNTIL idx >= SITE_RING_N STEP { SET idx TO idx + 1. } DO {
+    LOCAL hh IS siteElev(geoOffset(geo, idx * 360 / SITE_RING_N, SITE_RING)).
+    SET hMin TO MIN(hMin, hh).
+    SET hMax TO MAX(hMax, hh).
+  }
+  RETURN hMax - hMin.
+}
+
+// The flattest way to arrive.  Samples the corridor a landing run would use -
+// from SITE_FINAL short of the point to half that beyond it, for the rollout -
+// on each of eight headings, and returns the smoothest.  Only headings within
+// 90 degrees of the way the ship is already coming are considered: a low, slow
+// glider does not get to turn round to use a nicer field.
+FUNCTION siteRunHdg {
+  PARAMETER geo, approachHdg.
+  LOCAL bestH IS approachHdg.
+  LOCAL bestC IS -1.
+  FROM { LOCAL idx IS 0. } UNTIL idx >= 8 STEP { SET idx TO idx + 1. } DO {
+    LOCAL hdg IS idx * 45.
+    IF ABS(normAng(hdg - approachHdg)) <= 90 {
+      LOCAL hMin IS siteElev(geo).
+      LOCAL hMax IS hMin.
+      FROM { LOCAL jdx IS -4. } UNTIL jdx > 2 STEP { SET jdx TO jdx + 1. } DO {
+        LOCAL hh IS siteElev(geoOffset(geo, hdg, jdx * SITE_FINAL / 4)).
+        SET hMin TO MIN(hMin, hh).
+        SET hMax TO MAX(hMax, hh).
+      }
+      LOCAL cost IS hMax - hMin.
+      IF bestC < 0 OR cost < bestC { SET bestC TO cost. SET bestH TO hdg. }
+    }
+  }
+  RETURN bestH.
+}
+
+// Lay candidates out ahead of the ship inside what it can still reach, score
+// them, and keep the best.  Everything is a one-off cost paid at the moment of
+// the decision, not per guidance pass - about ninety terrain lookups.
+SET gSite      TO KSC_RWY.
+SET gSiteHdg   TO RUNWAY_HDG.
+SET gSiteWater TO FALSE.
+SET gSiteRough TO 0.
+FUNCTION pickLandingSite {
+  PARAMETER reach.
+  LOCAL base   IS flightHdg().
+  LOCAL bestC  IS -1.
+  LOCAL bestG  IS geoOffset(SHIP:GEOPOSITION, base, MAX(2000, reach * SITE_NEAR_FRAC)).
+  FROM { LOCAL ib IS -SITE_BEARINGS. } UNTIL ib > SITE_BEARINGS STEP { SET ib TO ib + 1. } DO {
+    FROM { LOCAL ir IS 0. } UNTIL ir >= SITE_RANGES STEP { SET ir TO ir + 1. } DO {
+      LOCAL frac IS SITE_NEAR_FRAC + (SITE_FAR_FRAC - SITE_NEAR_FRAC)
+                    * ir / MAX(1, SITE_RANGES - 1).
+      LOCAL cand IS geoOffset(SHIP:GEOPOSITION, base + ib * SITE_SPREAD, reach * frac).
+      LOCAL cost IS SITE_WATER_PEN.
+      IF NOT siteIsWater(cand) { SET cost TO siteRoughness(cand). }
+      // Tie-break toward the space centre, gently: flatness decides, and being
+      // 100 km nearer home is worth about 200 m of it.
+      SET cost TO cost + SITE_HOME_GAIN * geoRange(cand, KSC_RWY).
+      IF bestC < 0 OR cost < bestC { SET bestC TO cost. SET bestG TO cand. }
+    }
+  }
+  SET gSite      TO bestG.
+  SET gSiteWater TO siteIsWater(bestG).
+  SET gSiteRough TO 0.
+  IF NOT gSiteWater { SET gSiteRough TO siteRoughness(bestG). }
+  SET gSiteHdg   TO siteRunHdg(bestG, compassOf(bestG:POSITION)).
+}
+
+// AoA schedule for the entry: high alpha only while there is orbital energy to
+// throw away, tapering to a flyable angle as the ship slows.  Holding a big
+// number all the way down is what parks a spaceplane at the top of the
+// atmosphere with no speed left and then drops it.
+//
+// The schedule tops out at ENTRY_AOA_NOM, not at REENTRY_AOA: the full dump
+// attitude is something the energy loop asks for when it has range to burn, not
+// the default posture for meeting the atmosphere.  See the REENTRY_AOA note.
 FUNCTION entryAoA {
   LOCAL spd IS SHIP:AIRSPEED.
-  IF spd >= ENTRY_AOA_HI { RETURN REENTRY_AOA. }
+  IF spd >= ENTRY_AOA_HI { RETURN ENTRY_AOA_NOM. }
   IF spd <= ENTRY_AOA_LO { RETURN GLIDE_AOA_MAX. }
   LOCAL frac IS (spd - ENTRY_AOA_LO) / (ENTRY_AOA_HI - ENTRY_AOA_LO).
-  RETURN GLIDE_AOA_MAX + frac * (REENTRY_AOA - GLIDE_AOA_MAX).
+  RETURN GLIDE_AOA_MAX + frac * (ENTRY_AOA_NOM - GLIDE_AOA_MAX).
 }
 
 // Fly the final approach and return at the flare height.  Nose for speed, boards
@@ -1002,15 +1310,22 @@ FUNCTION finalApproach {
 // stalled at the top, dived, recovered, climbed again, and repeated the cycle
 // until the tanks were empty and the last dive reached the sea.  Thrust here
 // buys speed only, and only while the ship is descending.
+// `hdgWant` is the direction the landing run should be flown in - the flattest
+// line through a chosen site, or simply the way the ship is already going when
+// there was no choosing.  A little bank is allowed to settle onto it, because
+// arriving across a valley is worse than a shallow turn; the wings still come
+// level for the last of it.
 FUNCTION emergencyLanding {
+  PARAMETER hdgWant.
   SET tNext TO 0.
   UNTIL ALT:RADAR < FLARE_ALT OR SHIP:STATUS = "LANDED" OR SHIP:STATUS = "SPLASHED" {
     LOCAL spd IS SHIP:AIRSPEED.
     IF SHIP:DYNAMICPRESSURE < STALL_Q AND ALT:RADAR > 200 {
       stallRecover(150).
     } ELSE {
-      setNav(flightHdg(), APPR_AOA + (spd - APPR_SPEED) * AOA_PER_MS, GLIDE_AOA_MAX).
-      SET gBank TO 0.
+      setNav(hdgWant, APPR_AOA + (spd - APPR_SPEED) * AOA_PER_MS, GLIDE_AOA_MAX).
+      SET gBank TO clampVal(-15, 15, gBank).
+      IF ALT:RADAR < 150 OR TIME:SECONDS < gSteady { SET gBank TO 0. }
       SET landHdg TO gHdg.
       IF USE_JETS_SHORT AND resAmt("LiquidFuel") > JET_MIN_LF AND spd < APPR_SPEED {
         SET gThrot TO clampVal(0, 1, THROT_MIN_PWR + (APPR_SPEED - spd) * THROT_PER_MS).
@@ -1258,7 +1573,12 @@ UNTIL SHIP:AIRSPEED < ENTRY_END_SPD OR SHIP:ALTITUDE < ENTRY_FLOOR {
   // time once it does.
   IF offBy > ENTRY_TRIM_TOL { SET gOffCnt TO gOffCnt + 1. } ELSE { SET gOffCnt TO 0. }
   IF gOffCnt > 20 {                                    // 2 s of not flying it
-    SET gAoaCap TO MAX(ENTRY_AOA_MIN, gAoaCap - ENTRY_AOA_STEP).
+    // Give back what is actually being overshot, not a fixed 2 degrees.  A cap
+    // that walks down 2 deg per 2 s cannot catch an airframe that is 24 deg past
+    // its command: the reference entry went 40 -> 38 while the nose went 46 ->
+    // 70, and the departure arrived long before the trim did.
+    SET gAoaCap TO MAX(ENTRY_AOA_MIN,
+          gAoaCap - MAX(ENTRY_AOA_STEP, offBy - ENTRY_TRIM_TOL)).
     SET gOffCnt TO 0.
     PRINT "  ** holding " + ROUND(noseOff()) + " deg off the airstream against a " +
           ROUND(cmdOff()) + " deg command - entry alpha capped at " +
@@ -1282,7 +1602,7 @@ UNTIL SHIP:AIRSPEED < ENTRY_END_SPD OR SHIP:ALTITUDE < ENTRY_FLOOR {
     SET gOffCnt TO 0.
   }
 
-  IF eRatio > ENERGY_LONG      { SET aoaCmd TO MIN(REENTRY_AOA,  aoaCmd + 6). }
+  IF eRatio > ENERGY_LONG      { SET aoaCmd TO MIN(REENTRY_AOA,  aoaCmd + ENTRY_AOA_DUMP). }
   ELSE IF eRatio < ENERGY_SHORT { SET aoaCmd TO MAX(ENTRY_AOA_MIN, aoaCmd - 8). }
 
   // Too much alpha too low down turns the entry into a skip: the ship balloons
@@ -1391,20 +1711,87 @@ PRINT "  Jet fuel: " + ROUND(resAmt("LiquidFuel")) + " LF - " +
       ROUND(MAX(0, resAmt("LiquidFuel") - gLfFloor)) + " for the glide, " +
       ROUND(gLfFloor) + " held for the approach.".
 
-UNTIL (groundRange(FAF) < FAF_CAPTURE AND SHIP:ALTITUDE - RWY_ELEV < FAF_AGL + 1000)
-      OR SHIP:ALTITUDE - RWY_ELEV < GLIDE_FLOOR
+// Where the glide is flying, which is the runway until it demonstrably cannot
+// be.  Every geometry term below is taken from these rather than from the FAF
+// directly, so a diversion is a change of aim point and nothing else: the same
+// energy plan, the same terrain deck, the same guidance law, pointed somewhere
+// the ship can actually get to.
+SET gTarget     TO FAF.
+SET gTargetAgl  TO FAF_AGL.
+SET gTargetElev TO RWY_ELEV.
+SET gDiverted   TO FALSE.
+SET gShortCnt   TO 0.
+SET gSiteNext   TO 0.
+
+UNTIL (groundRange(gTarget) < FAF_CAPTURE
+       AND SHIP:ALTITUDE - gTargetElev < gTargetAgl + 1000)
+      OR SHIP:ALTITUDE - gTargetElev < GLIDE_FLOOR
       OR ALT:RADAR < TERRAIN_ABORT {
-  LOCAL rngFAF  IS groundRange(FAF).
+  LOCAL rngFAF  IS groundRange(gTarget).
   LOCAL spd     IS SHIP:AIRSPEED.
   ldSample(rngFAF).
+
+  // --- Can the runway still be reached? ------------------------------------
+  // The one question the old glide never asked.  Reach is the capability priced
+  // off the L/D actually being flown, plus a pessimistic valuation of the jet
+  // allowance; range is the distance to the fix.  Being short for DIVERT_COMMIT
+  // seconds running is not a bad patch of air, it is the flight not working, and
+  // the answer is to pick somewhere reachable while there is still height to fly
+  // there in.  Being long again for the same reason takes the runway back - the
+  // divert is a live comparison, not a latch.
+  LOCAL reachNow IS rangeCapability() + jetRangeLeft().
+  LOCAL rngHome  IS groundRange(FAF).
+  IF reachNow < rngHome * DIVERT_RATIO { SET gShortCnt TO gShortCnt + 1. }
+  ELSE IF reachNow > rngHome * DIVERT_CLEAR { SET gShortCnt TO 0. }
+
+  IF gShortCnt > DIVERT_COMMIT * 10 AND TIME:SECONDS > gSiteNext {
+    // Re-picked every SITE_RESCAN_T while the shortfall stands, because the
+    // reach estimate sharpens as the ship descends and the site that was right
+    // at 20 km may be well beyond the one that is right at 8.  Announced only
+    // when the answer actually changes - a log that repeats itself every thirty
+    // seconds is a log nobody reads the important line in.
+    LOCAL sitePrev IS gSite.
+    LOCAL saidYet  IS gDiverted.
+    pickLandingSite(reachNow).
+    SET gSiteNext   TO TIME:SECONDS + SITE_RESCAN_T.
+    SET gTarget     TO geoOffset(gSite, gSiteHdg - 180, SITE_FINAL).
+    SET gTargetAgl  TO SITE_FINAL * TAN(GLIDESLOPE).
+    SET gTargetElev TO siteElev(gSite).
+    SET gMtnNext    TO 0.                     // new track: re-measure the ground
+    IF (NOT saidYet) OR geoRange(sitePrev, gSite) > 5000 {
+      LOCAL what IS "flat ground".
+      IF gSiteWater { SET what TO "open water". }
+      PRINT "  !! KSC is out of reach (" + ROUND(reachNow / 1000) + " km of reach, " +
+            ROUND(rngHome / 1000) + " km to go) - diverting.".
+      PRINT "     Landing on " + what + " " + ROUND(groundRange(gSite) / 1000, 1) +
+            " km ahead, " + ROUND(geoRange(gSite, KSC_RWY) / 1000) + " km from the KSC" +
+            ", elev " + ROUND(siteElev(gSite)) + " m, run-in heading " +
+            ROUND(gSiteHdg) + ", spread " + ROUND(gSiteRough) + " m.".
+    }
+    SET gDiverted TO TRUE.
+    SET rngFAF    TO groundRange(gTarget).
+  } ELSE IF gDiverted AND gShortCnt = 0 {
+    PRINT "  ** the runway is back in reach (" + ROUND(reachNow / 1000) +
+          " km) - resuming the approach.".
+    SET gTarget     TO FAF.
+    SET gTargetAgl  TO FAF_AGL.
+    SET gTargetElev TO RWY_ELEV.
+    SET gDiverted   TO FALSE.
+    SET gMtnNext    TO 0.
+    SET rngFAF      TO groundRange(gTarget).
+  }
   // The profile is a statement about *energy*, and the ship's altitude is only
   // half of the energy it has.  Comparing bare altitude against it reads a ship
   // at 5 km doing Mach 2 - an energy height of 26 km, wildly long, and about to
   // fly straight past the field - as 2.5 km *below* profile, retracts the
   // boards, and lights the jets.  Both sides are energy heights here: what the
   // ship has, and what the range ahead of it costs.
+  // Referenced to the *target*, whichever one that now is.  energyHeight() is
+  // measured above the runway, so a site 900 m up costs its elevation on top of
+  // the arrival height and the glide ratio to get there.
   LOCAL ehNow   IS energyHeight().
-  LOCAL profEh  IS FAF_AGL + APPR_SPEED * APPR_SPEED / (2 * G0) + rngFAF / PLAN_LD.
+  LOCAL profEh  IS (gTargetElev - RWY_ELEV) + gTargetAgl
+                   + APPR_SPEED * APPR_SPEED / (2 * G0) + rngFAF / PLAN_LD.
 
   // The ridge ahead is part of the profile, not an exception to it.  A glider
   // that arrives at high ground low does not clear it, so the highest terrain
@@ -1412,7 +1799,7 @@ UNTIL (groundRange(FAF) < FAF_CAPTURE AND SHIP:ALTITUDE - RWY_ELEV < FAF_AGL + 1
   // descend through - and the energy plan is raised to whatever holding that
   // deck costs.  A ship that cannot pay that is short, and being told so 60 km
   // out is the difference between lighting the jets and hitting a mountain.
-  LOCAL deckAlt IS scanTerrain(FAF) + MTN_CLEAR.
+  LOCAL deckAlt IS scanTerrain(gTarget) + MTN_CLEAR.
   LOCAL deckEh  IS MAX(0, deckAlt - RWY_ELEV) + APPR_SPEED * APPR_SPEED / (2 * G0).
   IF deckEh > profEh { SET profEh TO deckEh. }
 
@@ -1436,7 +1823,7 @@ UNTIL (groundRange(FAF) < FAF_CAPTURE AND SHIP:ALTITUDE - RWY_ELEV < FAF_AGL + 1
     // 20 km is 450 m/s and over the runway is 110 - a single number here is a
     // stall order everywhere it was not measured.
     LOCAL spdTgt  IS glideSpeedTarget().
-    LOCAL hdgWant IS FAF:HEADING.
+    LOCAL hdgWant IS gTarget:HEADING.
     LOCAL ehErr   IS ehNow - profEh.
 
     // ...but a speed is not a flight path, and a nose that is only ever trimmed
@@ -1477,9 +1864,23 @@ UNTIL (groundRange(FAF) < FAF_CAPTURE AND SHIP:ALTITUDE - RWY_ELEV < FAF_AGL + 1
     //             is still 60 km away.  This is the one that flies the approach.
     LOCAL vsRadar IS MIN(TERRAIN_CLIMB, (TERRAIN_FLOOR - ALT:RADAR) / TERRAIN_TAU).
     LOCAL vsDeck  IS MIN(TERRAIN_CLIMB, (deckAlt - SHIP:ALTITUDE) / TERRAIN_TAU).
+    // A wing that is barely flying cannot be sent over a mountain, and ordering
+    // it to try is not a terrain guard - it is a stall, repeated.  The reference
+    // flight held a 3 656 m deck at 3.9 km with no energy left and phugoided
+    // into the ridge doing it: stall at 82 m/s, dive, recover at 121, climb,
+    // stall, for 150 km.  So the *predictive* deck is advisory, and it stands
+    // down below MANEUVER_Q - the ridge is then the divert logic's problem,
+    // which is where a ridge that cannot be climbed belongs.  vsRadar is not
+    // gated: the hillside directly underneath outranks everything, always.
+    IF SHIP:DYNAMICPRESSURE < MANEUVER_Q { SET vsDeck TO MIN(vsDeck, 0). }
     LOCAL vsFloor IS MAX(vsRadar, vsDeck).
     LOCAL lowGnd  IS vsFloor > vsWant.
     SET vsWant TO MAX(vsWant, vsFloor).
+
+    // Straight out of a recovery the ship is at the speed that just failed.  A
+    // commanded climb there is the way directly back into the stall, so unless
+    // the ground itself is the reason, the steady window is flown descending.
+    IF TIME:SECONDS < gSteady AND NOT lowGnd { SET vsWant TO MIN(vsWant, -2). }
 
     // Say it out loud, once each way.  A glide that quietly stops descending is
     // indistinguishable in the log from a glide that has stopped working, and
@@ -1528,7 +1929,7 @@ UNTIL (groundRange(FAF) < FAF_CAPTURE AND SHIP:ALTITUDE - RWY_ELEV < FAF_AGL + 1
           SET gSturn TO -gSturn.
           SET tFlip  TO TIME:SECONDS + STURN_PERIOD.
         }
-        SET hdgWant TO FAF:HEADING + gSturn * STURN_OFFSET.
+        SET hdgWant TO gTarget:HEADING + gSturn * STURN_OFFSET.
       }
     } ELSE {
       SET tFlip TO TIME:SECONDS + STURN_PERIOD.
@@ -1556,7 +1957,8 @@ UNTIL (groundRange(FAF) < FAF_CAPTURE AND SHIP:ALTITUDE - RWY_ELEV < FAF_AGL + 1
     // early part where a deficit is recoverable, keep the fuel for the end where
     // it is not.  The deck is inside it, because a ridge has to be paid for
     // whatever the glide ratio.
-    LOCAL stretchEh IS FAF_AGL + APPR_SPEED * APPR_SPEED / (2 * G0)
+    LOCAL stretchEh IS (gTargetElev - RWY_ELEV) + gTargetAgl
+                       + APPR_SPEED * APPR_SPEED / (2 * G0)
                        + rngFAF / LD_STRETCH.
     LOCAL armEh IS MAX(stretchEh, deckEh).
     IF ehNow < armEh OR SHIP:DYNAMICPRESSURE < STALL_Q OR lowGnd {
@@ -1620,10 +2022,12 @@ UNTIL (groundRange(FAF) < FAF_CAPTURE AND SHIP:ALTITUDE - RWY_ELEV < FAF_AGL + 1
   // seconds since the top of this pass, and a report of where the ship *was* is
   // exactly the kind of thing that hides a problem like this one.
   IF TIME:SECONDS > tNext {
-    LOCAL rngNow IS groundRange(FAF).
-    LOCAL profNow IS MAX(FAF_AGL + rngNow / PLAN_LD,
+    LOCAL rngNow IS groundRange(gTarget).
+    LOCAL profNow IS MAX((gTargetElev - RWY_ELEV) + gTargetAgl + rngNow / PLAN_LD,
                          MAX(0, gMtnPeak + MTN_CLEAR - RWY_ELEV))
                      + APPR_SPEED * APPR_SPEED / (2 * G0).
+    LOCAL tgtName IS "rwy".
+    IF gDiverted { SET tgtName TO "alt". }
     PRINT "  glide  alt " + ROUND(SHIP:ALTITUDE - RWY_ELEV) +
           "/" + ROUND(ALT:RADAR) + " m" +
           "  energy " + ROUND(energyHeight()) +
@@ -1634,7 +2038,7 @@ UNTIL (groundRange(FAF) < FAF_CAPTURE AND SHIP:ALTITUDE - RWY_ELEV < FAF_AGL + 1
           "  thr " + ROUND(gThrot * 100) + "%" +
           "  L/D " + ROUND(gLdMeas, 1) +
           "  mtn " + ROUND(gMtnPeak) + " m" +
-          "  rwy " + ROUND(alongTrackToRwy()/1000, 1) + " km".
+          "  " + tgtName + " " + ROUND(rngNow/1000, 1) + " km".
     SET tNext TO TIME:SECONDS + 5.
   }
   WAIT 0.1.
@@ -1649,18 +2053,35 @@ UNTIL (groundRange(FAF) < FAF_CAPTURE AND SHIP:ALTITUDE - RWY_ELEV < FAF_AGL + 1
 // there does not make the runway any closer - it just banks a low, slow ship at
 // a field it cannot reach.  Say which one happened and fly the one we are in.
 SET landHdg  TO RUNWAY_HDG.
-SET divertGo TO groundRange(KSC_RWY) > DIVERT_RANGE.
+SET divertGo TO gDiverted OR groundRange(KSC_RWY) > DIVERT_RANGE.
 
-GEAR ON.
+// Wheels down for a runway or a field; wheels *up* for water.  A gear leg in
+// the water at 100 m/s is a pivot, and the ship arrives inverted.
+IF gDiverted AND gSiteWater {
+  GEAR OFF.
+} ELSE {
+  GEAR ON.
+}
 LIGHTS ON.
 BRAKES OFF.
 
 IF divertGo {
-  PRINT "!! Out of height " + ROUND(groundRange(KSC_RWY)/1000, 1) +
-        " km from the runway - no approach to fly.".
-  PRINT "   Landing straight ahead on heading " + ROUND(flightHdg()) + ".".
-  SET landHdg TO flightHdg().
-  emergencyLanding().
+  IF gDiverted {
+    // The chosen case: this was decided minutes ago, the ship has been flying
+    // at it since, and it arrives on the run-in heading the terrain picked.
+    SET landWhat TO "flat ground".
+    IF gSiteWater { SET landWhat TO "water". }
+    PRINT "Arriving at the alternate: " + landWhat + " " +
+          ROUND(geoRange(gSite, KSC_RWY)/1000, 1) + " km from the KSC.".
+    PRINT "   Landing run on heading " + ROUND(gSiteHdg) + ".".
+    SET landHdg TO gSiteHdg.
+  } ELSE {
+    PRINT "!! Out of height " + ROUND(groundRange(KSC_RWY)/1000, 1) +
+          " km from the runway - no approach to fly.".
+    PRINT "   Landing straight ahead on heading " + ROUND(flightHdg()) + ".".
+    SET landHdg TO flightHdg().
+  }
+  emergencyLanding(landHdg).
 } ELSE {
   PRINT "Runway captured. Final approach on heading " + RUNWAY_HDG + ".".
   finalApproach().
@@ -1702,8 +2123,13 @@ SET alongEnd TO alongTrackToRwy().
 PRINT "======================================================".
 IF SHIP:STATUS = "LANDED" AND rngEnd < 3000 {
   PRINT "STOPPED ON THE RUNWAY.".
+} ELSE IF SHIP:STATUS = "LANDED" AND gDiverted {
+  PRINT "DOWN AND STOPPED AT THE CHOSEN ALTERNATE, " +
+        ROUND(rngEnd/1000, 1) + " km from the runway.".
 } ELSE IF SHIP:STATUS = "LANDED" {
   PRINT "DOWN AND STOPPED, but " + ROUND(rngEnd/1000, 1) + " km from the runway.".
+} ELSE IF SHIP:STATUS = "SPLASHED" AND gDiverted AND gSiteWater {
+  PRINT "DITCHED AS PLANNED, " + ROUND(rngEnd/1000, 1) + " km from the runway.".
 } ELSE IF SHIP:STATUS = "SPLASHED" {
   PRINT "!! DITCHED IN THE WATER " + ROUND(rngEnd/1000, 1) + " km from the runway.".
 } ELSE {
