@@ -209,12 +209,23 @@ SET THROT_MIN_PWR  TO 0.25.      // spool-up floor, held only while genuinely sh
 // Height above the *runway* is not height above the ground.  Everything the
 // energy plan says is referenced to a sea-level runway, and the approach to the
 // KSC from the west crosses ridges over 2 km high: a descent that is perfectly
-// on profile flies straight through them.  These four numbers are the only
-// thing in the script that knows the ground is there, so they outrank the plan.
+// on profile flies straight through them.  These are the only numbers in the
+// script that know the ground is there, so they outrank the plan.
+//
+// Two layers, and they answer different questions.  TERRAIN_* is reactive - it
+// reads ALT:RADAR, the ground directly underneath, and is the last guard before
+// a hillside.  MTN_* is predictive: it scans the ground all the way to the fix
+// and raises a *deck* the glide is not allowed to descend through while the high
+// ground is still ahead.  Only the second one can save a glider, because a
+// glider does not climb over a ridge - it has to arrive already above it, and by
+// the time the radar sees the face there is nothing left to do about it.
 SET TERRAIN_FLOOR  TO 500.       // radar altitude the glide will not sink below (m)
-SET TERRAIN_TAU    TO 12.        // seconds over which the sink is bled off at the floor
-SET TERRAIN_CLIMB  TO 8.         // climb commanded when already below the floor (m/s)
+SET TERRAIN_TAU    TO 12.        // seconds over which the sink is bled off at a floor
+SET TERRAIN_CLIMB  TO 8.         // climb commanded when already below a floor (m/s)
 SET TERRAIN_ABORT  TO 250.       // radar altitude at which the glide gives up and lands (m)
+SET MTN_CLEAR      TO 350.       // clearance held over the highest ground ahead (m)
+SET MTN_SAMPLES    TO 20.        // sample points along the track to the fix
+SET MTN_SCAN_T     TO 2.         // seconds between terrain scans
 
 // --- Tunables: the flight envelope ------------------------------------------
 // How far the nose may be commanded off the airstream, and how hard the ship may
@@ -858,6 +869,51 @@ FUNCTION geoOffset {
   RETURN LATLNG(origin:LAT + dLat, origin:LNG + dLng).
 }
 
+// ---------------------------------------------------------------------------
+//  Terrain look-ahead
+//
+//  The highest ground between here and a point, sampled along the direct track.
+//
+//  This is the number the whole approach turns on, and until now the script did
+//  not have it.  ALT:RADAR answers "how high is the ground *under* me", and that
+//  is the wrong question by exactly the time it takes to act on the answer: at
+//  190 m/s a ridge face is eight seconds wide, and a glider with 8 m/s of climb
+//  in hand cannot outrun rising ground.  A glider does not fly over a ridge, it
+//  arrives already above it - so the ridge has to be measured while it is still
+//  tens of kilometres ahead, and the energy plan has to be told about it then.
+//
+//  Two flights have now ended in the mountains west of the KSC, both of them on
+//  an energy profile that was, referenced to a sea-level runway 68 m up, exactly
+//  on plan the whole way down.  The plan was not wrong about energy.  It simply
+//  had no idea the ground was not flat.
+FUNCTION terrainPeakTo {
+  PARAMETER geo, samples.
+  LOCAL peak IS MAX(0, geo:TERRAINHEIGHT).
+  LOCAL rng  IS groundRange(geo).
+  IF rng < 100 OR samples < 1 { RETURN peak. }
+  LOCAL here  IS SHIP:GEOPOSITION.
+  LOCAL hdgTo IS geo:HEADING.
+  FROM { LOCAL idx IS 0. } UNTIL idx > samples STEP { SET idx TO idx + 1. } DO {
+    LOCAL pt IS geoOffset(here, hdgTo, rng * idx / samples).
+    SET peak TO MAX(peak, pt:TERRAINHEIGHT).
+  }
+  RETURN peak.
+}
+
+// Cached, because a scan is MTN_SAMPLES geoposition lookups and the guidance
+// loop runs at 10 Hz.  The ridge does not move; only our distance to it does,
+// and MTN_SCAN_T seconds of that is 2 km at glide speed.
+SET gMtnPeak TO 0.
+SET gMtnNext TO 0.
+FUNCTION scanTerrain {
+  PARAMETER geo.
+  IF TIME:SECONDS >= gMtnNext {
+    SET gMtnPeak TO terrainPeakTo(geo, MTN_SAMPLES).
+    SET gMtnNext TO TIME:SECONDS + MTN_SCAN_T.
+  }
+  RETURN gMtnPeak.
+}
+
 // AoA schedule for the entry: the full high-alpha attitude only while there is
 // orbital energy to throw away, tapering to a flyable angle as the ship slows.
 // Holding 40 degrees all the way down is what parks a spaceplane at the top of
@@ -1286,15 +1342,33 @@ SET tNext   TO 0.
 SET gDepart  TO 0.
 SET gLowQ    TO 0.
 SET gPowerOn TO FALSE.
+SET gDeckOn  TO FALSE.
 
 PRINT "Gliding home. Ground range to the runway: " +
       ROUND(groundRange(KSC_RWY)/1000, 1) + " km.".
+
+// Measure the mountains before flying at them, not while hitting them.
+SET gMtnNext TO 0.
+PRINT "  Highest ground on the way in: " + ROUND(scanTerrain(FAF)) + " m" +
+      "  (deck " + ROUND(gMtnPeak + MTN_CLEAR) + " m, runway is at " +
+      ROUND(RWY_ELEV) + " m).".
+
+// Start the L/D measurement over.  The entry's number is a hypersonic one and
+// has no bearing on what the wing does at 190 m/s; what the glide is really
+// getting, boards and all, is the number that says whether PLAN_LD is honest.
+// Reported only - feeding it back into the profile is the loop that taught the
+// entry to stop dumping because it was dumping.
+SET gLdMeas TO 0.
+SET gLdEh   TO 0.
+SET gLdRng  TO 0.
+SET gLdNext TO TIME:SECONDS + LD_SAMPLE.
 
 UNTIL (groundRange(FAF) < FAF_CAPTURE AND SHIP:ALTITUDE - RWY_ELEV < FAF_AGL + 1000)
       OR SHIP:ALTITUDE - RWY_ELEV < GLIDE_FLOOR
       OR ALT:RADAR < TERRAIN_ABORT {
   LOCAL rngFAF  IS groundRange(FAF).
   LOCAL spd     IS SHIP:AIRSPEED.
+  ldSample(rngFAF).
   // The profile is a statement about *energy*, and the ship's altitude is only
   // half of the energy it has.  Comparing bare altitude against it reads a ship
   // at 5 km doing Mach 2 - an energy height of 26 km, wildly long, and about to
@@ -1303,6 +1377,16 @@ UNTIL (groundRange(FAF) < FAF_CAPTURE AND SHIP:ALTITUDE - RWY_ELEV < FAF_AGL + 1
   // ship has, and what the range ahead of it costs.
   LOCAL ehNow   IS energyHeight().
   LOCAL profEh  IS FAF_AGL + APPR_SPEED * APPR_SPEED / (2 * G0) + rngFAF / PLAN_LD.
+
+  // The ridge ahead is part of the profile, not an exception to it.  A glider
+  // that arrives at high ground low does not clear it, so the highest terrain
+  // between here and the fix sets a *deck* - an altitude the glide may not
+  // descend through - and the energy plan is raised to whatever holding that
+  // deck costs.  A ship that cannot pay that is short, and being told so 60 km
+  // out is the difference between lighting the jets and hitting a mountain.
+  LOCAL deckAlt IS scanTerrain(FAF) + MTN_CLEAR.
+  LOCAL deckEh  IS MAX(0, deckAlt - RWY_ELEV) + APPR_SPEED * APPR_SPEED / (2 * G0).
+  IF deckEh > profEh { SET profEh TO deckEh. }
 
   // A departure is the nose refusing to follow the airstream for several seconds
   // running, not one frame of it: the ship arrives here rotating down from the
@@ -1353,15 +1437,33 @@ UNTIL (groundRange(FAF) < FAF_CAPTURE AND SHIP:ALTITUDE - RWY_ELEV < FAF_AGL + 1
     LOCAL vHor   IS VXCL(SHIP:UP:VECTOR, SHIP:VELOCITY:SURFACE):MAG.
     LOCAL vsWant IS -vHor / MAX(0.5, ldWant).
 
-    // The ground outranks the plan.  vsFloor is the most sink the radar altitude
-    // can pay for: unbinding while there is height under the ship, bleeding to
-    // nothing as it closes on TERRAIN_FLOOR, and turning into a commanded climb
-    // below it.  Without this the profile is free to fly a textbook descent into
-    // a 2 km ridge, which is exactly what it did on the last flight - the energy
-    // plan was satisfied the whole way down.
-    LOCAL vsFloor IS MIN(TERRAIN_CLIMB, (TERRAIN_FLOOR - ALT:RADAR) / TERRAIN_TAU).
+    // The ground outranks the plan, in two layers.  Each is the most sink its
+    // own reference can pay for: unbinding while there is height in hand,
+    // bleeding to nothing as the ship closes on the limit, and turning into a
+    // commanded climb below it.  The tighter of the two wins.
+    //
+    //   vsRadar - the hillside directly underneath.  Last resort, and on its own
+    //             far too late: it cannot see a ridge until the ridge is under
+    //             the ship, and 8 m/s of climb does not clear one from there.
+    //   vsDeck  - the highest ground between here and the fix, measured while it
+    //             is still 60 km away.  This is the one that flies the approach.
+    LOCAL vsRadar IS MIN(TERRAIN_CLIMB, (TERRAIN_FLOOR - ALT:RADAR) / TERRAIN_TAU).
+    LOCAL vsDeck  IS MIN(TERRAIN_CLIMB, (deckAlt - SHIP:ALTITUDE) / TERRAIN_TAU).
+    LOCAL vsFloor IS MAX(vsRadar, vsDeck).
     LOCAL lowGnd  IS vsFloor > vsWant.
     SET vsWant TO MAX(vsWant, vsFloor).
+
+    // Say it out loud, once each way.  A glide that quietly stops descending is
+    // indistinguishable in the log from a glide that has stopped working, and
+    // this script has printed both.
+    IF lowGnd AND NOT gDeckOn {
+      SET gDeckOn TO TRUE.
+      PRINT "  ** high ground ahead (" + ROUND(gMtnPeak) + " m) - holding the " +
+            ROUND(deckAlt) + " m deck.".
+    } ELSE IF gDeckOn AND NOT lowGnd {
+      SET gDeckOn TO FALSE.
+      PRINT "  ** clear of the high ground - back on the energy profile.".
+    }
 
     LOCAL aoaCmd IS GLIDE_AOA + (spd - spdTgt) * AOA_PER_MS
                     + clampVal(-GLIDE_VS_AUTH, GLIDE_VS_AUTH,
@@ -1373,13 +1475,18 @@ UNTIL (groundRange(FAF) < FAF_CAPTURE AND SHIP:ALTITUDE - RWY_ELEV < FAF_AGL + 1
     IF VERTICALSPEED > SKIP_VS AND NOT lowGnd { SET aoaCmd TO MIN(aoaCmd, GLIDE_AOA). }
 
     // Drag and track length are the other two ways to spend energy, and unlike
-    // the nose they cost no speed.  Both only while there is enough air under the
-    // wing to use them: S-turning a wing that is barely flying is what puts a
-    // spaceplane on its back, and neither is worth anything with the ground
-    // coming up.
-    IF ehErr > BOARD_MARGIN AND SHIP:DYNAMICPRESSURE > MANEUVER_Q AND NOT lowGnd {
+    // the nose they cost no altitude.  Both only while there is enough air under
+    // the wing to use them: S-turning a wing that is barely flying is what puts
+    // a spaceplane on its back.
+    //
+    // Neither is gated on the deck, because the deck is already inside profEh -
+    // a ship reading long is long *after* paying for the ridge, and what it has
+    // spare at a fixed altitude is speed, which is what the boards are for.  The
+    // S-turn is the exception: the terrain scan is along the direct track, so
+    // 40 degrees off it is 40 degrees of ground nobody measured.
+    IF ehErr > BOARD_MARGIN AND SHIP:DYNAMICPRESSURE > MANEUVER_Q {
       BRAKES ON.
-    } ELSE IF ehErr < BOARD_OFF OR SHIP:DYNAMICPRESSURE < MANEUVER_Q OR lowGnd {
+    } ELSE IF ehErr < BOARD_OFF OR SHIP:DYNAMICPRESSURE < MANEUVER_Q {
       BRAKES OFF.
     }
 
@@ -1453,15 +1560,19 @@ UNTIL (groundRange(FAF) < FAF_CAPTURE AND SHIP:ALTITUDE - RWY_ELEV < FAF_AGL + 1
   // exactly the kind of thing that hides a problem like this one.
   IF TIME:SECONDS > tNext {
     LOCAL rngNow IS groundRange(FAF).
+    LOCAL profNow IS MAX(FAF_AGL + rngNow / PLAN_LD,
+                         MAX(0, gMtnPeak + MTN_CLEAR - RWY_ELEV))
+                     + APPR_SPEED * APPR_SPEED / (2 * G0).
     PRINT "  glide  alt " + ROUND(SHIP:ALTITUDE - RWY_ELEV) +
           "/" + ROUND(ALT:RADAR) + " m" +
           "  energy " + ROUND(energyHeight()) +
-          "/" + ROUND(FAF_AGL + APPR_SPEED * APPR_SPEED / (2 * G0)
-                      + rngNow / PLAN_LD) + " m" +
+          "/" + ROUND(profNow) + " m" +
           "  spd " + ROUND(SHIP:AIRSPEED) + "/" + ROUND(glideSpeedTarget()) + " m/s" +
           "  vs " + ROUND(VERTICALSPEED) + " m/s" +
           "  AoA " + ROUND(noseOff()) + " deg" +
           "  thr " + ROUND(gThrot * 100) + "%" +
+          "  L/D " + ROUND(gLdMeas, 1) +
+          "  mtn " + ROUND(gMtnPeak) + " m" +
           "  rwy " + ROUND(alongTrackToRwy()/1000, 1) + " km".
     SET tNext TO TIME:SECONDS + 5.
   }

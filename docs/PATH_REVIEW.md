@@ -36,7 +36,7 @@ was there.
 | Glide | rwy 9.5 km | `** stalled at 95 m/s` → dive → 6 709 → 1 275 m in 5.5 km of ground |
 | — | — | ground |
 
-Four faults. The third one is the crash; the first three are how it got there.
+Five faults. The third one is the crash; the other four are how it got there.
 
 ## 1. A speed is not a flight path
 
@@ -126,21 +126,55 @@ can do is dive. It stalls, `stallRecover()` dives it at `RECOVER_AOA` toward a
 floor 600 m above a runway 10 km away, and 5 434 m of descent later, in 5.5 km of
 ground, it is in the mountains.
 
-**Changed.** `ALT:RADAR` — height above whatever is actually underneath — now
-bounds the sink command directly:
+**Changed, reactively.** `ALT:RADAR` — height above whatever is actually
+underneath — now bounds the sink command directly:
 
 ```
-vsFloor = MIN(TERRAIN_CLIMB, (TERRAIN_FLOOR - ALT:RADAR) / TERRAIN_TAU)
-vsWant  = MAX(vsWant, vsFloor)
+vsRadar = MIN(TERRAIN_CLIMB, (TERRAIN_FLOOR - ALT:RADAR) / TERRAIN_TAU)
+vsWant  = MAX(vsWant, vsRadar)
 ```
 
 That is unbinding with height under the ship, bleeds the allowed sink to nothing
 as it closes on `TERRAIN_FLOOR` (500 m), and becomes a commanded `TERRAIN_CLIMB`
-below it. The same flag (`lowGnd`) stows the boards, cancels the S-turn, and
-holds the throttle at the spool-up floor, because none of those three are worth
-anything with the ground coming up. `stallRecover()`'s floor is radar altitude
-now, in every one of its four call sites, and below `TERRAIN_ABORT` the glide
-stops being a glide and hands over to the landing.
+below it. `stallRecover()`'s floor is radar altitude now, in every one of its
+four call sites, and below `TERRAIN_ABORT` the glide stops being a glide and
+hands over to the landing.
+
+**And that is not enough, which is the whole point.** `ALT:RADAR` answers "how
+high is the ground *under* me", and that is the wrong question by exactly the
+time it takes to act on the answer. At 190 m/s a ridge face is eight seconds
+wide, and 8 m/s of climb buys 64 m in those eight seconds against a face that
+rises 2 000. A glider does not fly over a ridge. It arrives already above it, or
+it does not arrive.
+
+So the ridge is measured while it is still sixty kilometres away:
+
+```
+FUNCTION terrainPeakTo { PARAMETER geo, samples. ... }   // max terrain, here -> geo
+deckAlt = scanTerrain(FAF) + MTN_CLEAR
+deckEh  = (deckAlt - RWY_ELEV) + APPR_SPEED^2 / 2g
+profEh  = MAX(profEh, deckEh)
+vsDeck  = MIN(TERRAIN_CLIMB, (deckAlt - SHIP:ALTITUDE) / TERRAIN_TAU)
+```
+
+`MTN_SAMPLES` (20) points along the direct track to the fix, rescanned every
+`MTN_SCAN_T` (2 s, which is 400 m of closure — the ridge does not move, only our
+distance to it does). The highest of them plus `MTN_CLEAR` is a **deck**, and the
+deck does two things:
+
+* it bounds the sink command, on the same construction as the radar floor, and
+  the tighter of the two wins;
+* it raises the **energy profile** to whatever holding that deck costs. This is
+  the half that matters. A ship that cannot pay for the ridge now reads short
+  sixty kilometres out, which arms the jets while thrust is still worth
+  something, instead of reading perfectly on profile right up to the impact.
+
+The one thing still gated on the deck binding (`lowGnd`) is the S-turn, because
+the scan runs along the direct track and 40° off it is 40° of ground nobody
+measured. The boards are deliberately *not* gated on it: the deck is inside
+`profEh` now, so a ship reading long is long after paying for the ridge, and what
+it has spare while pinned at a fixed altitude is speed — which is exactly what
+the boards are for.
 
 The plan does not get a vote here. It cannot see.
 
@@ -198,17 +232,36 @@ commanded to fly sideways.
    If it pins at 500 and the throttle sits at 25% for a long stretch, the ship is
    terrain-following a ridge it should have crossed higher — which is a signal to
    raise `ENTRY_RANGE` no differently from landing short.
-3. **The `energy` pair converging.** The two numbers should close on each other
+3. **`Highest ground on the way in`**, printed once as the glide starts, and
+   `mtn` in every glide line. This is the number two flights have now died of not
+   having. It should read a couple of thousand metres on a westerly approach and
+   fall toward the runway elevation as the ridge goes behind. If it reads 0 all
+   the way in, the scan is not finding terrain and the deck is doing nothing —
+   check that the approach really is over water.
+4. **`** high ground ahead ... holding the N m deck`** and its matching
+   `** clear of the high ground`. One pair of these on a westerly approach is
+   normal and is the system working. Several pairs in quick succession means the
+   ship is porpoising against the deck: lengthen `TERRAIN_TAU`.
+5. **`L/D` in the glide line**, which is now the *glide's* number and not the
+   entry's — the filter is reset at handover. This is the direct answer to
+   "it is having a hard time gliding". Clean, boards in, on speed, it should sit
+   near `PLAN_LD` (4.5). If it settles well below that with the boards stowed,
+   `PLAN_LD` is optimistic for this airframe and every profile in the script is
+   built on it: lower it and the ship will start dumping earlier and arriving
+   higher. It is reported only — nothing feeds it back into the profile, because
+   feeding a measurement taken while dumping into the decision to dump is the
+   loop that taught the entry to stop dumping because it was dumping.
+6. **The `energy` pair converging.** The two numbers should close on each other
    as the range closes. Diverging — either way — is the fault this review is
    about, and it will now show up as a sustained `vs` at the `LD_DUMP` or
    `LD_STRETCH` limit rather than as a quiet cruise.
-4. **`entry alpha capped at`.** It should be rare now, and when it fires the two
+7. **`entry alpha capped at`.** It should be rare now, and when it fires the two
    angles it prints are nose-off-airstream against command-off-airstream. A gap
    there is a real trim failure and `REENTRY_AOA` should come down.
-5. **`energy` at the glide handover.** This flight started the glide 21 km of
+8. **`energy` at the glide handover.** This flight started the glide 21 km of
    energy height long. With the split capability model the entry should dump more
    and hand over nearer 1.0; if it now hands over *short*, `ENTRY_RANGE` (800 km)
    is the number to lower, not `ENTRY_LD`.
-6. **Fuel remaining in the closing report.** The 24%-for-30-km burn should be
+9. **Fuel remaining in the closing report.** The 24%-for-30-km burn should be
    gone entirely. Any significant jet time with the `energy` pair showing the
    ship at or above profile is a regression in the arming logic.
