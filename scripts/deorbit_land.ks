@@ -166,16 +166,25 @@ SET DEORBIT_PE     TO 32000.     // target periapsis for the deorbit burn (m)
 // that is wrong on the short side has no correction available to it.  Long does:
 // boards, alpha, S-turns and, in the last 8 km, a spiral.
 //
-// 700 km is therefore where this sits.  It is the measured 660 plus a little of
-// the range the entry fixes should hand back, and it leaves ~180 km of dumping
-// authority against the clean-flight figure - which is the side of the schedule
-// that has a control on it.
+// 700 km was therefore where this sat while the entry was still tumbling.  The
+// first flight that did not tumble settled it the other way: the ship reached
+// the fix with 26 km to go and **37.5 km of energy height against the 7.2 it
+// needed**, a surplus of 30 km - which at PLAN_LD is 136 km of range it had and
+// could not use.  That is the schedule being short, not the airframe being
+// good, and it is the whole reason the approach was then handed a ship 814 m
+// above its own glideslope.
+//
+// 830 km is the measured 700 + 136, rounded down.  It also lands almost exactly
+// on the 800 this file started with and the ~880 the reference data credits a
+// clean entry with - which is the number the tumbling flights were never able
+// to confirm.
+//
 //
 // Trim rule: crossing the field with energy to spare means the ship out-flew
 // this number, so raise it; landing short means lower it.  100 km is 9.5 deg of
 // Kerbin ground track, so the steps are big and one flight tells you which way.
 // The end-of-flight report prints the signed miss and the direction to trim.
-SET ENTRY_RANGE    TO 700000.    // ground range from the interface to the KSC (m)
+SET ENTRY_RANGE    TO 830000.    // ground range from the interface to the KSC (m)
 
 // Ground-track angle before the KSC at which the burn is started.  Left at 0 it
 // is *solved* from ENTRY_RANGE and the coast arc the deorbit ellipse will sweep
@@ -430,6 +439,13 @@ SET FINAL_DIST     TO 9000.      // final approach fix, this far short of the th
 SET GLIDESLOPE     TO 5.         // final-approach descent angle (deg)
 SET APPR_SPEED     TO 110.       // target airspeed on final (m/s)
 SET APPR_AOA       TO 6.         // trim AoA on final (deg)
+// The approach flies a flight path, for the same reason the glide does.  Trimmed
+// for a speed and nothing else it holds whatever trajectory it arrives on, and
+// what it arrives on after a stall recovery is a climb: the last flight captured
+// the runway 814 m above the slope, stalled at 85 m/s, and the recovery zoomed
+// it from 1.7 km to 3.7 km - twice - straight over the field.
+SET APPR_VS_TAU    TO 20.        // seconds over which a height error is flown off
+SET APPR_VS_AUTH   TO 12.        // most extra sink the slope error may command (m/s)
 SET LOC_GAIN       TO 2.5.       // heading correction per degree of localiser error
 SET LOC_MAX        TO 25.        // largest intercept angle onto the centreline (deg)
 SET FAF_CAPTURE    TO 2500.      // ground range to the fix that counts as captured (m)
@@ -1312,22 +1328,39 @@ FUNCTION finalApproach {
     LOCAL agl    IS SHIP:ALTITUDE - RWY_ELEV.
     LOCAL tgtAgl IS rng * TAN(GLIDESLOPE).
     LOCAL spd    IS SHIP:AIRSPEED.
+    // The wing needs a pressure, not a number.  APPR_SPEED is the sea-level
+    // answer, and at the fix - a kilometre and a half up - it is 16 m/s below
+    // what the air there can carry: the last flight was handed 110 to aim at
+    // where it needed 126, arrived behind the drag curve, and stalled at 85.
+    LOCAL spdTgt IS MAX(APPR_SPEED, glideSpeedTarget()).
 
     // Still worth recovering while there is height to dive in; below that the
     // flare is the only card left and fighting for airspeed just flies it in.
     IF SHIP:DYNAMICPRESSURE < STALL_Q AND ALT:RADAR > 300 {
       stallRecover(200).
     } ELSE {
-      IF agl > tgtAgl + 60 { BRAKES ON. }
-      ELSE IF agl < tgtAgl + 15 { BRAKES OFF. }
-      IF spd < APPR_SPEED - 10 { BRAKES OFF. }
+      IF agl > tgtAgl + 60 AND spd > spdTgt - 10 { BRAKES ON. }
+      ELSE IF agl < tgtAgl + 15 OR spd < spdTgt - 10 { BRAKES OFF. }
 
       LOCAL hdgWant IS RUNWAY_HDG.
       IF rng > 400 {
         SET hdgWant TO RUNWAY_HDG +
               clampVal(-LOC_MAX, LOC_MAX, normAng(KSC_RWY:HEADING - RUNWAY_HDG) * LOC_GAIN).
       }
-      setNav(hdgWant, APPR_AOA + (spd - APPR_SPEED) * AOA_PER_MS, GLIDE_AOA_MAX).
+
+      // ... and a flight path, not just a speed.  The sink that holds the slope,
+      // steepened by however far above it the ship is, and never a climb: an
+      // approach descends, and one that does not is on its way past the field.
+      LOCAL vHor    IS VXCL(SHIP:UP:VECTOR, SHIP:VELOCITY:SURFACE):MAG.
+      LOCAL vsWant  IS -vHor * TAN(GLIDESLOPE)
+                       - clampVal(-APPR_VS_AUTH, APPR_VS_AUTH,
+                                  (agl - tgtAgl) / APPR_VS_TAU).
+      SET vsWant TO MIN(vsWant, -1).
+
+      setNav(hdgWant, APPR_AOA + (spd - spdTgt) * AOA_PER_MS
+                      + clampVal(-GLIDE_VS_AUTH, GLIDE_VS_AUTH,
+                                 (vsWant - VERTICALSPEED) * GLIDE_VS_GAIN),
+             GLIDE_AOA_MAX).
       SET gBank TO clampVal(-20, 20, gBank).
       IF ALT:RADAR < 120 { SET gBank TO 0. }               // wings level before the wheels
       IF TIME:SECONDS < gSteady { SET gBank TO 0. }        // ... and after a recovery
@@ -1336,9 +1369,12 @@ FUNCTION finalApproach {
       // altitude: above the slope with the speed made good it comes straight off
       // again, or the ship arrives high, fast and floating down the runway.
       IF USE_JETS_SHORT AND resAmt("LiquidFuel") > JET_MIN_LF
-         AND (agl < tgtAgl - 60 OR spd < APPR_SPEED - 20) {
-        SET gThrot TO clampVal(0, 1, THROT_MIN_PWR + (APPR_SPEED - spd) * THROT_PER_MS).
-        IF agl > tgtAgl + 60 AND spd > APPR_SPEED { SET gThrot TO 0. }
+         AND (agl < tgtAgl - 60 OR spd < spdTgt - 20) {
+        SET gThrot TO clampVal(0, 1, THROT_MIN_PWR + (spdTgt - spd) * THROT_PER_MS).
+        // A ship above its slope never needs thrust, however slow it is.  The
+        // answer to slow and high is the nose, and the sink command above is
+        // already giving it - thrust here just flies the ship down the runway.
+        IF agl > tgtAgl + 60 { SET gThrot TO 0. }
       } ELSE {
         SET gThrot TO 0.
       }
@@ -1653,7 +1689,12 @@ UNTIL SHIP:AIRSPEED < ENTRY_END_SPD OR SHIP:ALTITUDE < ENTRY_FLOOR {
           ROUND(cmdOff()) + " deg command - entry alpha capped at " +
           ROUND(gAoaCap) + ".".
   } ELSE IF offBy < 5 AND gAoaCap < REENTRY_AOA {
-    SET gAoaCap TO MIN(REENTRY_AOA, gAoaCap + 0.01).   // ~1 deg per 10 s of good tracking
+    // The cap has to be able to come back, or three departures leave the entry
+    // pinned at ENTRY_AOA_MIN with no way to spend energy at all.  The last
+    // flight walked it 26 -> 24 -> 12 and then read `energy 4.2`, `4.7`, `6.48`
+    // while flying 12 degrees, because at one degree per ten seconds it could
+    // never climb back out.  Three degrees per ten seconds of clean tracking.
+    SET gAoaCap TO MIN(REENTRY_AOA, gAoaCap + 0.03).
   }
 
   // Departed: the nose is not merely lagging the command, it has let go of the
@@ -2072,7 +2113,13 @@ UNTIL (groundRange(gTarget) < FAF_CAPTURE
                        + APPR_SPEED * APPR_SPEED / (2 * G0)
                        + rngFAF / LD_STRETCH.
     LOCAL armEh IS MAX(stretchEh, deckEh).
-    IF ehNow < armEh OR SHIP:DYNAMICPRESSURE < STALL_Q OR lowGnd {
+    // A stalled wing is not on its own a reason to burn fuel.  A ship that has
+    // stopped flying while it is *long* has height to dive into and wants the
+    // nose, not thrust: the last flight was two energy heights over profile,
+    // tumbling at 124 degrees off the airstream, and the low-q arm put the
+    // throttle to 100% because the speed error was large.  Thrust belongs to a
+    // ship that is short.
+    IF ehNow < armEh OR (SHIP:DYNAMICPRESSURE < STALL_Q AND ehNow < profEh) OR lowGnd {
       SET gPowerOn TO TRUE.
     } ELSE IF ehNow > armEh + LOW_MARGIN AND SHIP:DYNAMICPRESSURE > RECOVER_Q {
       SET gPowerOn TO FALSE.
