@@ -215,9 +215,28 @@ SET COAST_LEAD     TO 30.        // come out of warp this long before the interf
 // range to throw away.  This is also the direct answer to "stay higher, do not
 // slow down so aggressively": less alpha is less drag is a shallower, faster,
 // longer entry.
-SET REENTRY_AOA    TO 40.        // most alpha the entry will ever command (deg)
-SET ENTRY_AOA_NOM  TO 28.        // ... and what it holds when it is on its range plan
-SET ENTRY_AOA_DUMP TO 10.        // alpha added on top of nominal when long (deg)
+// Two flights have now departed out of this schedule, and the numbers say the
+// envelope is narrower than it was written for.  Commanded 38 the nose went to
+// 45, then 61, and let go at 67; recovered and commanded 30, it went to 52, then
+// 59, and let go at 71 — after which it never flew again, tumbling at 112, 103
+// and finally 171 degrees off its own airstream all the way to the handover.
+// The airframe holds something in the twenties, not something in the forties.
+SET REENTRY_AOA    TO 32.        // most alpha the entry will ever command (deg)
+SET ENTRY_AOA_NOM  TO 22.        // ... and what it holds when it is on its range plan
+SET ENTRY_AOA_DUMP TO 8.         // alpha added on top of nominal when long (deg)
+// The attitude held while there is no air worth the name.  Alpha is a drag
+// device, and a drag device in a vacuum is not a control - it is just an
+// attitude the ship has to be holding when the air arrives.  Holding 38 up there
+// is what put a spaceplane into the first real dynamic pressure of the entry
+// already at 46 degrees of alpha, from which it departed within seconds.
+SET ENTRY_AOA_THIN TO 15.        // alpha held above ENTRY_WORK_Q (deg)
+// How long the entry flies minimum alpha after a departure before the energy
+// controller is allowed to ask for attitude again.  STEADY_TIME's eight seconds
+// are a glider's settling time; at Mach 6 they are twelve kilometres, and the
+// last flight spent them re-establishing the exact command that had just thrown
+// it - "still 6 deg off the airstream", then 30 commanded, then 52, then 59,
+// then gone for the rest of the entry.
+SET ENTRY_SETTLE_T TO 30.        // seconds of minimum alpha after an entry departure
 SET ENTRY_AOA_HI   TO 2000.      // airspeed at/above which the full AoA is held (m/s)
 SET ENTRY_AOA_LO   TO 500.       // airspeed at/below which AoA has tapered to glide AoA
 SET ENTRY_AOA_MIN  TO 12.        // least alpha the entry will fly when it is short (deg)
@@ -227,7 +246,25 @@ SET ENTRY_END_SPD  TO 650.       // hand over to the glide at this airspeed (m/s
 SET ENTRY_FLOOR    TO 15000.     // ... or at this altitude, as a backstop only (m)
 SET ENTRY_HOLD_RNG TO 60000.     // stop chasing the bearing inside this ground range (m)
 SET ENTRY_STURN_T  TO 25.        // seconds between entry bank reversals
-SET ENTRY_LD       TO 3.0.       // ground range flown per metre of energy height, hypersonic
+// The entry's energy controller only means anything where there is air for it to
+// act through.  Between the interface and about 53 km this ship is still very
+// nearly on its orbit: the last flight covered 351 km of the 715 it had to fly
+// while spending 29 km of energy height, an apparent glide ratio of **12**, and
+// no attitude it could have held would have changed that much.  Judging the
+// range plan there, and worse *acting* on the judgement by commanding dump
+// alpha, spends the only thing the ship has - control authority and a stable
+// attitude - on a decision that has no purchase.  Above this pressure the entry
+// holds ENTRY_AOA_THIN, keeps the boards in and does not S-turn; the energy
+// controller wakes up when the air does.
+SET ENTRY_WORK_Q   TO 0.005.     // dynamic pressure (atm) at which alpha starts to mean something
+// Not 3.0.  That number describes a clean entry and this script has yet to fly
+// one: measured, the last flight made 1.99 over the whole entry and 0.82 across
+// the part where the wing was actually working.  Its real job is to be the
+// opening bid before the L/D measurement comes in, and at 2.4 the interface
+// reads `energy 1.11` - on plan, neither dumping nor stretching - which is the
+// honest posture for a number nobody has confirmed yet.  3.0 read 1.32 and sent
+// the ship straight to its dump attitude on the strength of it.
+SET ENTRY_LD       TO 2.4.       // ground range flown per metre of energy height, hypersonic
 SET ENERGY_LONG    TO 1.15.      // range capability / range to go above which we are long
 SET ENERGY_SHORT   TO 1.00.      // ... and below which we are short and must stretch
 SET SKIP_VS        TO 15.        // climbing faster than this = ballooning, unload AoA
@@ -377,6 +414,8 @@ SET STEADY_TIME    TO 8.         // wings-level seconds granted after a recovery
 // for the reading to mean something.
 SET RECOVER_HDG_RATE TO 10.      // deg/s the recovery heading may be walked (deg/s)
 SET RECOVER_HDG_OK   TO 60.      // nose within this of the airstream before it is walked
+SET RECOVER_THROT    TO 0.6.     // most throttle a recovery may use
+SET RECOVER_SINK     TO -3.      // ... and only while descending at least this fast (m/s)
 // Absolute attitude envelope, applied to every atmospheric command as a last
 // resort.  Both limits must stay clear of the attitudes the AoA law legitimately
 // asks for, or they quietly become the very thing this script exists to avoid -
@@ -888,7 +927,17 @@ FUNCTION stallRecover {
     // dense air it fights the aerodynamic controls and adds exactly the snatch
     // this recovery is trying to take out.
     IF SHIP:DYNAMICPRESSURE < RCS_Q_OFF { RCS ON. } ELSE { RCS OFF. }
-    IF jets { SET gThrot TO 1. }
+    // A recovery is a DIVE, and thrust in a dive buys speed.  At full throttle
+    // with the nose 2 degrees off a level airstream it buys height instead: the
+    // ship accelerates along whatever path it is already on, crosses RECOVER_Q
+    // still going up, stalls at the top, and recovers again 700 m higher.  The
+    // last flight climbed 1.3 km -> 4.1 km through five of those, spent the
+    // approach reserve doing it, and arrived at the ground vertical.  So the
+    // jets run only while the ship is genuinely coming down, and never at full.
+    IF jets {
+      SET gThrot TO RECOVER_THROT.
+      IF VERTICALSPEED > RECOVER_SINK { SET gThrot TO 0. }
+    }
     WAIT 0.05.
   }
   SET gThrot TO 0.
@@ -1323,7 +1372,21 @@ FUNCTION emergencyLanding {
     IF SHIP:DYNAMICPRESSURE < STALL_Q AND ALT:RADAR > 200 {
       stallRecover(150).
     } ELSE {
-      setNav(hdgWant, APPR_AOA + (spd - APPR_SPEED) * AOA_PER_MS, GLIDE_AOA_MAX).
+      // A speed is not a flight path here either.  Trimmed for the approach
+      // speed and nothing else, the ship is free to hold any trajectory it
+      // happens to be on - and coming out of a powered recovery that trajectory
+      // is a climb.  The last flight rode that all the way from 1.3 km to
+      // 4.1 km and back down into the ground.  A diversion descends: command the
+      // sink, and let the speed error trim it.
+      LOCAL vHor   IS VXCL(SHIP:UP:VECTOR, SHIP:VELOCITY:SURFACE):MAG.
+      LOCAL vsWant IS MIN(-3, -vHor / LD_STRETCH).
+      IF ALT:RADAR < TERRAIN_FLOOR {
+        SET vsWant TO MIN(TERRAIN_CLIMB, (TERRAIN_FLOOR - ALT:RADAR) / TERRAIN_TAU).
+      }
+      setNav(hdgWant, APPR_AOA + (spd - APPR_SPEED) * AOA_PER_MS
+                      + clampVal(-GLIDE_VS_AUTH, GLIDE_VS_AUTH,
+                                 (vsWant - VERTICALSPEED) * GLIDE_VS_GAIN),
+             GLIDE_AOA_MAX).
       SET gBank TO clampVal(-15, 15, gBank).
       IF ALT:RADAR < 150 OR TIME:SECONDS < gSteady { SET gBank TO 0. }
       SET landHdg TO gHdg.
@@ -1332,7 +1395,10 @@ FUNCTION emergencyLanding {
       } ELSE {
         SET gThrot TO 0.
       }
-      IF VERTICALSPEED > 0 { SET gThrot TO 0. }     // a diversion descends
+      // A diversion descends.  Not "is not climbing" - descends: level flight
+      // under power at the approach speed is a hold, and a hold at 100 m/s over
+      // rising ground with a finite tank is just a slower way to arrive.
+      IF VERTICALSPEED > RECOVER_SINK AND ALT:RADAR > TERRAIN_FLOOR { SET gThrot TO 0. }
     }
     IF TIME:SECONDS > tNext {
       PRINT "  divert  alt " + ROUND(ALT:RADAR) + " m" +
@@ -1553,6 +1619,7 @@ SET gSturn  TO 1.
 SET gAoaCap TO REENTRY_AOA.       // the most alpha the ship has shown it can hold
 SET gOffCnt TO 0.                 // consecutive passes flown wide of the command
 SET gDepCnt TO 0.                 // ... and consecutive passes flown clean off it
+SET gEntrySettle TO 0.            // hold minimum alpha until this time
 SET gLdNext TO TIME:SECONDS + LD_SAMPLE.
 UNTIL SHIP:AIRSPEED < ENTRY_END_SPD OR SHIP:ALTITUDE < ENTRY_FLOOR {
   LOCAL rngFAF IS groundRange(FAF).
@@ -1560,6 +1627,8 @@ UNTIL SHIP:AIRSPEED < ENTRY_END_SPD OR SHIP:ALTITUDE < ENTRY_FLOOR {
   LOCAL eRatio IS rangeCapability() / MAX(1000, rngFAF).
   LOCAL aoaCmd IS entryAoA().
   LOCAL hdgWant IS flightHdg().
+  // Is there air enough for any of this to be a control rather than a pose?
+  LOCAL working IS SHIP:DYNAMICPRESSURE > ENTRY_WORK_Q.
   // Tracking error against the *command*, not against the bare alpha - see
   // cmdOff().  The lean the S-turn asks for is part of the command, so flying it
   // is not evidence that the ship cannot hold its alpha.
@@ -1596,14 +1665,37 @@ UNTIL SHIP:AIRSPEED < ENTRY_END_SPD OR SHIP:ALTITUDE < ENTRY_FLOOR {
   // attitude is a transient, not a departure.
   IF offBy > ENTRY_HOLD_TOL { SET gDepCnt TO gDepCnt + 1. } ELSE { SET gDepCnt TO 0. }
   IF gDepCnt > 10 {
+    // A departure is the airframe's verdict on the command, and the answer to a
+    // verdict is not a 2-degree apology.  The number to learn from is the alpha
+    // that was being *asked for* when the ship let go - not how far off the
+    // airstream it ended up, which is a measure of the tumble and not of the
+    // envelope.  Cap below the failed command, and never above where the cap
+    // already was.
+    SET gAoaCap TO clampVal(ENTRY_AOA_MIN, gAoaCap - ENTRY_AOA_STEP,
+                            gAoa - ENTRY_AOA_STEP * 2).
     stallRecover(GLIDE_FLOOR).
-    SET gAoaCap TO MAX(ENTRY_AOA_MIN, gAoaCap - ENTRY_AOA_STEP).
     SET gDepCnt TO 0.
     SET gOffCnt TO 0.
+    SET gEntrySettle TO TIME:SECONDS + ENTRY_SETTLE_T.
+    PRINT "  ** entry alpha capped at " + ROUND(gAoaCap) + ", minimum alpha for " +
+          ROUND(ENTRY_SETTLE_T) + " s.".
   }
 
-  IF eRatio > ENERGY_LONG      { SET aoaCmd TO MIN(REENTRY_AOA,  aoaCmd + ENTRY_AOA_DUMP). }
-  ELSE IF eRatio < ENERGY_SHORT { SET aoaCmd TO MAX(ENTRY_AOA_MIN, aoaCmd - 8). }
+  IF working {
+    IF eRatio > ENERGY_LONG      { SET aoaCmd TO MIN(REENTRY_AOA,  aoaCmd + ENTRY_AOA_DUMP). }
+    ELSE IF eRatio < ENERGY_SHORT { SET aoaCmd TO MAX(ENTRY_AOA_MIN, aoaCmd - 8). }
+  } ELSE {
+    // Nothing to push against.  Hold a modest, stable attitude and let the ship
+    // arrive at the air pointing somewhere it can fly from.
+    SET aoaCmd TO MIN(aoaCmd, ENTRY_AOA_THIN).
+  }
+
+  // Straight out of a departure the ship is in exactly the attitude that just
+  // failed, and handing it back the command that caused it is what turned one
+  // recoverable excursion into seven.  The reference flight recovered cleanly
+  // from its first departure - "still 6 deg off the airstream" - was immediately
+  // commanded 30 degrees again, and was gone for good within twenty seconds.
+  IF TIME:SECONDS < gEntrySettle { SET aoaCmd TO MIN(aoaCmd, ENTRY_AOA_MIN). }
 
   // Too much alpha too low down turns the entry into a skip: the ship balloons
   // back out, bleeds the last of its speed at 35 km and falls out of the sky.
@@ -1614,8 +1706,8 @@ UNTIL SHIP:AIRSPEED < ENTRY_END_SPD OR SHIP:ALTITUDE < ENTRY_FLOOR {
   // BRAKES ON before the loop amounted to - they take the range the ship is
   // about to discover it needed, and they take it hardest in the last thin,
   // fast minutes where it can least be replaced.
-  IF eRatio > ENERGY_LONG { BRAKES ON. }
-  ELSE IF eRatio < ENERGY_LONG - 0.05 { BRAKES OFF. }
+  IF working AND eRatio > ENERGY_LONG { BRAKES ON. }
+  ELSE IF (NOT working) OR eRatio < ENERGY_LONG - 0.05 { BRAKES OFF. }
 
   // Steer at the fix while it is far enough away for its bearing to mean
   // something.  Inside ENTRY_HOLD_RNG the bearing to a point nearly underneath
@@ -1624,7 +1716,7 @@ UNTIL SHIP:AIRSPEED < ENTRY_END_SPD OR SHIP:ALTITUDE < ENTRY_FLOOR {
   // the overshoot is left for the glide to fly off.
   IF rngFAF > ENTRY_HOLD_RNG {
     SET hdgWant TO FAF:HEADING.
-    IF eRatio > ENERGY_LONG {
+    IF working AND eRatio > ENERGY_LONG AND TIME:SECONDS > gEntrySettle {
       IF TIME:SECONDS > tFlip {
         SET gSturn TO -gSturn.
         SET tFlip  TO TIME:SECONDS + ENTRY_STURN_T.
@@ -1744,12 +1836,26 @@ UNTIL (groundRange(gTarget) < FAF_CAPTURE
   IF reachNow < rngHome * DIVERT_RATIO { SET gShortCnt TO gShortCnt + 1. }
   ELSE IF reachNow > rngHome * DIVERT_CLEAR { SET gShortCnt TO 0. }
 
-  IF gShortCnt > DIVERT_COMMIT * 10 AND TIME:SECONDS > gSiteNext {
-    // Re-picked every SITE_RESCAN_T while the shortfall stands, because the
-    // reach estimate sharpens as the ship descends and the site that was right
-    // at 20 km may be well beyond the one that is right at 8.  Announced only
-    // when the answer actually changes - a log that repeats itself every thirty
-    // seconds is a log nobody reads the important line in.
+  // Choosing is the point; re-choosing is not.  Once a site is picked the ship
+  // is flying at it, and the KSC being out of reach is no longer news - it is
+  // the reason we are here.  Re-testing against the *runway* every thirty
+  // seconds picked eight different sites on the last flight, at 59, 69, 47, 23,
+  // 31, 18, 33, 20 and 8 km, with run-in headings of 135, 180, 45, 315, 180, 90,
+  // 90, 315 and 45: the ship spent the whole descent turning instead of
+  // arriving.  Once committed, the only question that matters is whether the
+  // site *we chose* is still reachable.
+  LOCAL needPick IS FALSE.
+  IF NOT gDiverted {
+    SET needPick TO gShortCnt > DIVERT_COMMIT * 10.
+  } ELSE IF TIME:SECONDS > gSiteNext {
+    SET needPick TO reachNow < rngFAF * DIVERT_RATIO.
+  }
+
+  IF needPick {
+    // Re-picked only when the site itself has slipped out of reach, and never
+    // more often than SITE_RESCAN_T.  That still allows the estimate to sharpen
+    // on the way down - a site chosen at 20 km may genuinely be beyond the ship
+    // by 8 - without letting it churn.
     LOCAL sitePrev IS gSite.
     LOCAL saidYet  IS gDiverted.
     pickLandingSite(reachNow).
@@ -1761,8 +1867,13 @@ UNTIL (groundRange(gTarget) < FAF_CAPTURE
     IF (NOT saidYet) OR geoRange(sitePrev, gSite) > 5000 {
       LOCAL what IS "flat ground".
       IF gSiteWater { SET what TO "open water". }
-      PRINT "  !! KSC is out of reach (" + ROUND(reachNow / 1000) + " km of reach, " +
-            ROUND(rngHome / 1000) + " km to go) - diverting.".
+      IF saidYet {
+        PRINT "  !! the alternate has slipped out of reach (" +
+              ROUND(reachNow / 1000) + " km) - re-choosing.".
+      } ELSE {
+        PRINT "  !! KSC is out of reach (" + ROUND(reachNow / 1000) + " km of reach, " +
+              ROUND(rngHome / 1000) + " km to go) - diverting.".
+      }
       PRINT "     Landing on " + what + " " + ROUND(groundRange(gSite) / 1000, 1) +
             " km ahead, " + ROUND(geoRange(gSite, KSC_RWY) / 1000) + " km from the KSC" +
             ", elev " + ROUND(siteElev(gSite)) + " m, run-in heading " +
