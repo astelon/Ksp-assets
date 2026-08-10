@@ -230,9 +230,26 @@ SET COAST_LEAD     TO 30.        // come out of warp this long before the interf
 // 59, and let go at 71 — after which it never flew again, tumbling at 112, 103
 // and finally 171 degrees off its own airstream all the way to the handover.
 // The airframe holds something in the twenties, not something in the forties.
-SET REENTRY_AOA    TO 32.        // most alpha the entry will ever command (deg)
-SET ENTRY_AOA_NOM  TO 22.        // ... and what it holds when it is on its range plan
-SET ENTRY_AOA_DUMP TO 8.         // alpha added on top of nominal when long (deg)
+// Four flights have now measured this envelope, and it is narrow:
+//
+//   commanded 40, 38, 30, 28, 22  ->  departed, every time
+//   commanded 15                  ->  held 15/15 on every print from 70 to 49 km
+//   commanded 12                  ->  held (12/9, 12/11, 12/12, 12/13)
+//
+// The last flight is the clean experiment.  ENTRY_AOA_THIN held the ship at a
+// flawless 15 degrees for twenty kilometres of descent; then dynamic pressure
+// crossed ENTRY_WORK_Q, the energy controller saw `energy 1.91` and stepped the
+// command straight to 30, and the ship departed within seconds - twice, because
+// the cap healed back to 30 and it was tried again.  A step change in alpha at
+// the exact moment the air starts to bite is the worst possible moment for it.
+//
+// So the whole schedule now lives inside the demonstrated envelope: 15 nominal,
+// which is also the thin-air attitude so there is no step at all, 19 at full
+// dump, 12 when short.  This ship dumps energy with drag and track length, not
+// with alpha, because alpha is the one thing it has proved it cannot fly.
+SET REENTRY_AOA    TO 20.        // most alpha the entry will ever command (deg)
+SET ENTRY_AOA_NOM  TO 15.        // ... and what it holds when it is on its range plan
+SET ENTRY_AOA_DUMP TO 4.         // alpha added on top of nominal when long (deg)
 // The attitude held while there is no air worth the name.  Alpha is a drag
 // device, and a drag device in a vacuum is not a control - it is just an
 // attitude the ship has to be holding when the air arrives.  Holding 38 up there
@@ -479,7 +496,15 @@ SET JET_RESERVE_FRAC TO 0.35.    // fraction of the fuel at handover reserved fo
 SET DIVERT_RATIO   TO 0.90.      // reach/range below which the runway is out of reach
 SET DIVERT_CLEAR   TO 1.05.      // ... and above which it is back in reach
 SET DIVERT_COMMIT  TO 15.        // seconds of being short before a site is chosen
-SET JET_RANGE_PER_LF TO 100.     // ground range one unit of LiquidFuel is assumed to buy (m)
+// Measured, not guessed.  The last flight spent all 1 249 units - the glide
+// allowance and then the approach reserve - and the jets bought it something
+// like 40 km of ground: about 30 m per unit, not 100.  The error is not
+// academic.  At 100 the reach test credited the ship with 81 km of jet range it
+// did not have, so a site 73 km away read as comfortably reachable, and the
+// glide spent twenty minutes at 25% throttle holding a 5 km terrain deck to
+// prove the credit wrong.  At 30 the same moment reads short and the divert
+// picks a site the ship can actually get to.
+SET JET_RANGE_PER_LF TO 30.      // ground range one unit of LiquidFuel is assumed to buy (m)
 
 // How the alternate is found.  Candidates are laid out ahead of the ship inside
 // what it can reach, scored on how flat the ground around them is, and the
@@ -495,6 +520,13 @@ SET SITE_RING      TO 1500.      // radius of the flatness ring around a candida
 SET SITE_RING_N    TO 6.         // points sampled on that ring
 SET SITE_WATER_PEN TO 250.       // roughness-equivalent cost of ditching (m)
 SET SITE_HOME_GAIN TO 0.002.     // ... and cost per metre farther from the KSC
+// A landing run is not free to point anywhere.  Scored on flatness alone, a
+// north-south valley beats an east-west ridge line, and the last flight was
+// committed to a run-in heading of 180 while arriving on 090 - a 90-degree turn
+// at the end of a glide, which took it off the approach and out over the water
+// 39.6 km off the centreline.  The turn is part of the cost.
+SET SITE_HDG_MAX   TO 60.        // furthest a run-in may lie from the arrival bearing (deg)
+SET SITE_HDG_COST  TO 3.         // roughness-equivalent cost per degree of that turn (m)
 SET SITE_FINAL     TO 3000.      // approach fix this far short of a chosen site (m)
 SET SITE_RESCAN_T  TO 30.        // least seconds between re-picking the site
 
@@ -1244,18 +1276,21 @@ FUNCTION siteRoughness {
   RETURN hMax - hMin.
 }
 
-// The flattest way to arrive.  Samples the corridor a landing run would use -
-// from SITE_FINAL short of the point to half that beyond it, for the rollout -
-// on each of eight headings, and returns the smoothest.  Only headings within
-// 90 degrees of the way the ship is already coming are considered: a low, slow
-// glider does not get to turn round to use a nicer field.
+// The flattest way to arrive that the ship can actually turn onto.  Samples the
+// corridor a landing run would use - from SITE_FINAL short of the point to half
+// that beyond it, for the rollout - on twelve headings, and scores each on the
+// spread of ground along it *plus* the turn it costs to get there.  A low, slow
+// glider does not get to turn round for a nicer field, and it does not get to
+// turn ninety degrees either: that is how the last flight ended up committed to
+// a southerly run-in while arriving from the west, and flew into the sea.
 FUNCTION siteRunHdg {
   PARAMETER geo, approachHdg.
   LOCAL bestH IS approachHdg.
   LOCAL bestC IS -1.
-  FROM { LOCAL idx IS 0. } UNTIL idx >= 8 STEP { SET idx TO idx + 1. } DO {
-    LOCAL hdg IS idx * 45.
-    IF ABS(normAng(hdg - approachHdg)) <= 90 {
+  FROM { LOCAL idx IS 0. } UNTIL idx >= 12 STEP { SET idx TO idx + 1. } DO {
+    LOCAL hdg  IS idx * 30.
+    LOCAL turn IS ABS(normAng(hdg - approachHdg)).
+    IF turn <= SITE_HDG_MAX {
       LOCAL hMin IS siteElev(geo).
       LOCAL hMax IS hMin.
       FROM { LOCAL jdx IS -4. } UNTIL jdx > 2 STEP { SET jdx TO jdx + 1. } DO {
@@ -1263,7 +1298,7 @@ FUNCTION siteRunHdg {
         SET hMin TO MIN(hMin, hh).
         SET hMax TO MAX(hMax, hh).
       }
-      LOCAL cost IS hMax - hMin.
+      LOCAL cost IS (hMax - hMin) + turn * SITE_HDG_COST.
       IF bestC < 0 OR cost < bestC { SET bestC TO cost. SET bestH TO hdg. }
     }
   }
@@ -1688,12 +1723,13 @@ UNTIL SHIP:AIRSPEED < ENTRY_END_SPD OR SHIP:ALTITUDE < ENTRY_FLOOR {
     PRINT "  ** holding " + ROUND(noseOff()) + " deg off the airstream against a " +
           ROUND(cmdOff()) + " deg command - entry alpha capped at " +
           ROUND(gAoaCap) + ".".
-  } ELSE IF offBy < 5 AND gAoaCap < REENTRY_AOA {
-    // The cap has to be able to come back, or three departures leave the entry
-    // pinned at ENTRY_AOA_MIN with no way to spend energy at all.  The last
-    // flight walked it 26 -> 24 -> 12 and then read `energy 4.2`, `4.7`, `6.48`
-    // while flying 12 degrees, because at one degree per ten seconds it could
-    // never climb back out.  Three degrees per ten seconds of clean tracking.
+  } ELSE IF offBy < 5 AND gAoaCap < REENTRY_AOA AND gAoa > gAoaCap - ENTRY_AOA_STEP {
+    // The cap may only heal on evidence about the cap.  Tracking perfectly at
+    // 12 degrees says nothing whatever about 30, and the last flight proved it:
+    // capped to 26 after a departure, it then flew a flawless minimum-alpha
+    // settle, healed the cap straight back through 30 on the strength of it,
+    // was handed 30 again the moment the settle expired, and departed again.
+    // Healing now requires the ship to be flying near the cap it is earning.
     SET gAoaCap TO MIN(REENTRY_AOA, gAoaCap + 0.03).
   }
 
