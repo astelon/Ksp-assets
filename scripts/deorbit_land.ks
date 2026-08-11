@@ -523,8 +523,19 @@ SET SITE_SPREAD    TO 25.        // degrees between those bearings
 SET SITE_RANGES    TO 3.         // candidate ranges along each bearing
 SET SITE_NEAR_FRAC TO 0.45.      // nearest candidate, as a fraction of the reach
 SET SITE_FAR_FRAC  TO 0.90.      // ... and the farthest
-SET SITE_RING      TO 1500.      // radius of the flatness ring around a candidate (m)
-SET SITE_RING_N    TO 6.         // points sampled on that ring
+// What "flat" has to mean.  A ring of points around a candidate measures a
+// *place*; an aeroplane needs a *line*.  A saddle between two peaks and a narrow
+// ledge both read smooth on a ring and neither has anywhere to put a spaceplane
+// down, so the measure is the spread of ground along the landing run itself -
+// SITE_RUN_LEN of it, sampled end to end, in the direction the ship would land.
+SET SITE_RUN_LEN   TO 4000.      // length of landing run a site has to provide (m)
+SET SITE_RUN_N     TO 3.         // samples either side of centre along that run
+// And whether the ship can get there at all.  A perfectly flat plateau behind a
+// 4 km ridge scores beautifully and is worth nothing: the candidate has to be
+// reachable *over the ground in between*, which is a question about the ship's
+// energy, not about the site.
+SET SITE_PATH_N    TO 6.         // samples along the track from here to a candidate
+SET SITE_BLOCKED   TO 5000.      // cost of a site the ship cannot clear the terrain to reach
 SET SITE_WATER_PEN TO 250.       // roughness-equivalent cost of ditching (m)
 SET SITE_HOME_GAIN TO 0.002.     // ... and cost per metre farther from the KSC
 // A landing run is not free to point anywhere.  Scored on flatness alone, a
@@ -1267,20 +1278,46 @@ FUNCTION siteElev {
   RETURN MAX(0, geo:TERRAINHEIGHT).
 }
 
-// How flat it is around a point: the spread of touch-down height over a ring of
-// radius SITE_RING.  Sub-sea samples are read at 0 rather than at the seabed,
-// which is what stops a coastal candidate being condemned for the depth of the
-// water next to it while correctly charging it for the cliff.
-FUNCTION siteRoughness {
-  PARAMETER geo.
+// The spread of touch-down height along a landing run of SITE_RUN_LEN, centred
+// on the point and laid out on the heading the ship would land on.  This is the
+// number a wheeled landing actually cares about: not how flat the neighbourhood
+// is, but whether there is a straight line of ground long enough to roll out on.
+// Sub-sea samples are read at 0 rather than at the seabed, which stops a coastal
+// run being condemned for the depth of the water beside it while still charging
+// it for the cliff.
+FUNCTION siteRunSpread {
+  PARAMETER geo, hdg.
   LOCAL hMin IS siteElev(geo).
   LOCAL hMax IS hMin.
-  FROM { LOCAL idx IS 0. } UNTIL idx >= SITE_RING_N STEP { SET idx TO idx + 1. } DO {
-    LOCAL hh IS siteElev(geoOffset(geo, idx * 360 / SITE_RING_N, SITE_RING)).
+  LOCAL step IS SITE_RUN_LEN / (2 * SITE_RUN_N).
+  FROM { LOCAL idx IS -SITE_RUN_N. } UNTIL idx > SITE_RUN_N STEP { SET idx TO idx + 1. } DO {
+    LOCAL hh IS siteElev(geoOffset(geo, hdg, idx * step)).
     SET hMin TO MIN(hMin, hh).
     SET hMax TO MAX(hMax, hh).
   }
   RETURN hMax - hMin.
+}
+
+// Can the ship even get there?  The highest ground between here and the
+// candidate has to be cleared with MTN_CLEAR to spare, and the candidate itself
+// reached at its own elevation - both paid out of the energy height the ship has
+// right now, at the best glide ratio it has.  A site that fails this is not a
+// site, however flat it is; it is a mountain with a field behind it, and the
+// last flight flew into exactly that.
+// Returns the energy height the ship is *short* by, so zero or less means it can
+// be reached.  A shortfall rather than a yes/no, because when every direction is
+// blocked - which happens, and is exactly when the answer matters most - a flat
+// yes/no ranks the impossible candidates among themselves by flatness, and picks
+// the prettiest field behind the tallest wall.  Graded, the least impossible one
+// wins instead, which is the one the ship might actually scrape into.
+FUNCTION siteShortfall {
+  PARAMETER geo.
+  LOCAL rng    IS groundRange(geo).
+  LOCAL peak   IS terrainPeakTo(geo, SITE_PATH_N).
+  LOCAL needEh IS MAX(MAX(0, siteElev(geo) - RWY_ELEV) + rng / LD_STRETCH,
+                      MAX(0, peak + MTN_CLEAR - RWY_ELEV))
+                  + APPR_SPEED * APPR_SPEED / (2 * G0).
+  RETURN needEh - energyHeight().
 }
 
 // The flattest way to arrive that the ship can actually turn onto.  Samples the
@@ -1298,14 +1335,7 @@ FUNCTION siteRunHdg {
     LOCAL hdg  IS idx * 30.
     LOCAL turn IS ABS(normAng(hdg - approachHdg)).
     IF turn <= SITE_HDG_MAX {
-      LOCAL hMin IS siteElev(geo).
-      LOCAL hMax IS hMin.
-      FROM { LOCAL jdx IS -4. } UNTIL jdx > 2 STEP { SET jdx TO jdx + 1. } DO {
-        LOCAL hh IS siteElev(geoOffset(geo, hdg, jdx * SITE_FINAL / 4)).
-        SET hMin TO MIN(hMin, hh).
-        SET hMax TO MAX(hMax, hh).
-      }
-      LOCAL cost IS (hMax - hMin) + turn * SITE_HDG_COST.
+      LOCAL cost IS siteRunSpread(geo, hdg) + turn * SITE_HDG_COST.
       IF bestC < 0 OR cost < bestC { SET bestC TO cost. SET bestH TO hdg. }
     }
   }
@@ -1319,6 +1349,7 @@ SET gSite      TO KSC_RWY.
 SET gSiteHdg   TO RUNWAY_HDG.
 SET gSiteWater TO FALSE.
 SET gSiteRough TO 0.
+SET gSiteBlocked TO FALSE.
 FUNCTION pickLandingSite {
   PARAMETER reach.
   LOCAL base   IS flightHdg().
@@ -1330,18 +1361,30 @@ FUNCTION pickLandingSite {
                     * ir / MAX(1, SITE_RANGES - 1).
       LOCAL cand IS geoOffset(SHIP:GEOPOSITION, base + ib * SITE_SPREAD, reach * frac).
       LOCAL cost IS SITE_WATER_PEN.
-      IF NOT siteIsWater(cand) { SET cost TO siteRoughness(cand). }
+      // Measured along the run the ship would actually fly, on the bearing it
+      // would actually arrive from.
+      IF NOT siteIsWater(cand) {
+        SET cost TO siteRunSpread(cand, compassOf(cand:POSITION)).
+      }
       // Tie-break toward the space centre, gently: flatness decides, and being
       // 100 km nearer home is worth about 200 m of it.
       SET cost TO cost + SITE_HOME_GAIN * geoRange(cand, KSC_RWY).
+      // ... and a site behind ground the ship cannot clear is not a candidate at
+      // all.  Priced rather than skipped, so there is always an answer even when
+      // every direction is blocked, and priced by *how far* short it falls so
+      // that the answer in that case is the least impossible one.
+      LOCAL shortBy IS siteShortfall(cand).
+      IF shortBy > 0 { SET cost TO cost + SITE_BLOCKED + shortBy. }
       IF bestC < 0 OR cost < bestC { SET bestC TO cost. SET bestG TO cand. }
     }
   }
   SET gSite      TO bestG.
   SET gSiteWater TO siteIsWater(bestG).
-  SET gSiteRough TO 0.
-  IF NOT gSiteWater { SET gSiteRough TO siteRoughness(bestG). }
   SET gSiteHdg   TO siteRunHdg(bestG, compassOf(bestG:POSITION)).
+  // Report the spread along the run we actually chose, not along some other one.
+  SET gSiteRough TO 0.
+  IF NOT gSiteWater { SET gSiteRough TO siteRunSpread(bestG, gSiteHdg). }
+  SET gSiteBlocked TO siteShortfall(bestG) > 0.
 }
 
 // AoA schedule for the entry: high alpha only while there is orbital energy to
@@ -1451,7 +1494,11 @@ FUNCTION emergencyLanding {
     // A recovery from here dives into the last of the height and hands back a
     // ship that immediately climbs away from the field it was about to land on,
     // and the reference flight rode that loop until the tanks were dry.
-    LOCAL committed IS ALT:RADAR < LAND_COMMIT.
+    // ... and *at* the place it is landing.  Radar altitude alone says "committed"
+    // 200 m over a ridge thirty kilometres out, which would fly a landing sink
+    // straight into the rock.  Committed means low AND there.
+    LOCAL nearSite  IS (NOT gDiverted) OR groundRange(gSite) < SITE_FINAL * 2.
+    LOCAL committed IS ALT:RADAR < LAND_COMMIT AND nearSite.
     IF SHIP:DYNAMICPRESSURE < STALL_Q AND NOT committed {
       stallRecover(LAND_COMMIT * 0.5).
     } ELSE {
@@ -1476,6 +1523,24 @@ FUNCTION emergencyLanding {
       //
       // Committed, the sink is gentle and fixed: fly it onto the ground.
       IF committed { SET vsWant TO -LAND_SINK. }
+
+      // Terrain *ahead*, which is a different question from terrain underneath
+      // and the only one a diversion is entitled to ask.  Removing the floor
+      // last time removed the climb that was flying the ship away from its own
+      // landing - and with it the only thing that knew a ridge was there, so it
+      // flew into one.  This is the guard that does not have the fault: it can
+      // stop the descent while high ground is still to be crossed, and that is
+      // all it can ever do.  MAX with zero means it will level off and never,
+      // under any circumstance, command a climb; and it stands down entirely
+      // once the ship is committed, because by then the ground ahead is the
+      // ground it is landing on.
+      LOCAL ridgeHold IS FALSE.
+      IF NOT committed {
+        IF SHIP:ALTITUDE < scanTerrain(gSite) + MTN_CLEAR {
+          SET vsWant   TO MAX(vsWant, 0).
+          SET ridgeHold TO TRUE.
+        }
+      }
       setNav(hdgWant, APPR_AOA + (spd - APPR_SPEED) * AOA_PER_MS
                       + clampVal(-GLIDE_VS_AUTH, GLIDE_VS_AUTH,
                                  (vsWant - VERTICALSPEED) * GLIDE_VS_GAIN),
@@ -1496,7 +1561,10 @@ FUNCTION emergencyLanding {
       // above be *paid for*: it cut the throttle only above TERRAIN_FLOOR, i.e.
       // everywhere except the place the ship was being told to climb.  There is
       // no height at which thrust into a climb is what a landing wants.
-      IF VERTICALSPEED > RECOVER_SINK { SET gThrot TO 0. }
+      // Crossing a ridge is the one thing thrust may hold level flight for, and
+      // only while the ridge is actually there.  Everywhere else a diversion
+      // descends, and thrust that is not buying descent is not bought.
+      IF VERTICALSPEED > RECOVER_SINK AND NOT ridgeHold { SET gThrot TO 0. }
       IF committed AND VERTICALSPEED > -LAND_SINK { SET gThrot TO 0. }
     }
     IF TIME:SECONDS > tNext {
@@ -1981,8 +2049,13 @@ UNTIL (groundRange(gTarget) < FAF_CAPTURE
       }
       PRINT "     Landing on " + what + " " + ROUND(groundRange(gSite) / 1000, 1) +
             " km ahead, " + ROUND(geoRange(gSite, KSC_RWY) / 1000) + " km from the KSC" +
-            ", elev " + ROUND(siteElev(gSite)) + " m, run-in heading " +
-            ROUND(gSiteHdg) + ", spread " + ROUND(gSiteRough) + " m.".
+            ", elev " + ROUND(siteElev(gSite)) + " m.".
+      PRINT "     Run " + ROUND(SITE_RUN_LEN / 1000, 1) + " km on heading " +
+            ROUND(gSiteHdg) + ", spread " + ROUND(gSiteRough) + " m, highest ground" +
+            " on the way " + ROUND(terrainPeakTo(gSite, SITE_PATH_N)) + " m.".
+      IF gSiteBlocked {
+        PRINT "     !! nothing clean is in reach - this is the least bad of them.".
+      }
     }
     SET gDiverted TO TRUE.
     SET rngFAF    TO groundRange(gTarget).
