@@ -468,6 +468,13 @@ SET LOC_MAX        TO 25.        // largest intercept angle onto the centreline 
 SET FAF_CAPTURE    TO 2500.      // ground range to the fix that counts as captured (m)
 SET GLIDE_FLOOR    TO 600.       // AGL at which the glide must hand over, wherever it is (m)
 SET DIVERT_RANGE   TO 12000.     // farther from the runway than this at the floor: land here
+// Below this the ship is landing, and nothing outranks that.  A stall recovery
+// needs height to dive in and buys speed the landing does not need; a terrain
+// guard is meaningless when the terrain *is* the destination.  Above it, both
+// still apply.  This is the height at which the answer to every question stops
+// being "recover" and starts being "put it down".
+SET LAND_COMMIT    TO 300.       // radar altitude at which the landing is committed (m)
+SET LAND_SINK      TO 5.         // steady sink flown once committed (m/s)
 SET FLARE_ALT      TO 28.        // radar altitude to begin the flare (m)
 SET FLARE_PITCH    TO 7.         // absolute nose-up attitude in the flare (deg)
 SET TOUCHDOWN_ALT  TO 3.         // radar altitude considered "on the wheels" (m)
@@ -1440,8 +1447,13 @@ FUNCTION emergencyLanding {
   SET tNext TO 0.
   UNTIL ALT:RADAR < FLARE_ALT OR SHIP:STATUS = "LANDED" OR SHIP:STATUS = "SPLASHED" {
     LOCAL spd IS SHIP:AIRSPEED.
-    IF SHIP:DYNAMICPRESSURE < STALL_Q AND ALT:RADAR > 200 {
-      stallRecover(150).
+    // Committed: the ground is close enough that arriving at it *is* the plan.
+    // A recovery from here dives into the last of the height and hands back a
+    // ship that immediately climbs away from the field it was about to land on,
+    // and the reference flight rode that loop until the tanks were dry.
+    LOCAL committed IS ALT:RADAR < LAND_COMMIT.
+    IF SHIP:DYNAMICPRESSURE < STALL_Q AND NOT committed {
+      stallRecover(LAND_COMMIT * 0.5).
     } ELSE {
       // A speed is not a flight path here either.  Trimmed for the approach
       // speed and nothing else, the ship is free to hold any trajectory it
@@ -1451,15 +1463,25 @@ FUNCTION emergencyLanding {
       // sink, and let the speed error trim it.
       LOCAL vHor   IS VXCL(SHIP:UP:VECTOR, SHIP:VELOCITY:SURFACE):MAG.
       LOCAL vsWant IS MIN(-3, -vHor / LD_STRETCH).
-      IF ALT:RADAR < TERRAIN_FLOOR {
-        SET vsWant TO MIN(TERRAIN_CLIMB, (TERRAIN_FLOOR - ALT:RADAR) / TERRAIN_TAU).
-      }
+      // No terrain floor here, and this is the whole bug the last flight flew.
+      // The glide has one because the ground is a hazard between it and the
+      // field; a diversion has none, because the ground *is* the field.  Copied
+      // across, it meant that below TERRAIN_FLOOR - which is to say from the
+      // moment the landing became real - the ship was ordered to climb back to
+      // 500 m at 8 m/s, with thrust, and the throttle cut that would have
+      // stopped it was itself gated above 500 m.  It descended beautifully,
+      // crossed the floor, was told to climb, slowed, stalled, dived to the
+      // recovery floor, pulled out a few metres up, and was told to climb
+      // again - until the fuel ran out.
+      //
+      // Committed, the sink is gentle and fixed: fly it onto the ground.
+      IF committed { SET vsWant TO -LAND_SINK. }
       setNav(hdgWant, APPR_AOA + (spd - APPR_SPEED) * AOA_PER_MS
                       + clampVal(-GLIDE_VS_AUTH, GLIDE_VS_AUTH,
                                  (vsWant - VERTICALSPEED) * GLIDE_VS_GAIN),
              GLIDE_AOA_MAX).
       SET gBank TO clampVal(-15, 15, gBank).
-      IF ALT:RADAR < 150 OR TIME:SECONDS < gSteady { SET gBank TO 0. }
+      IF committed OR TIME:SECONDS < gSteady { SET gBank TO 0. }
       SET landHdg TO gHdg.
       IF USE_JETS_SHORT AND resAmt("LiquidFuel") > JET_MIN_LF AND spd < APPR_SPEED {
         SET gThrot TO clampVal(0, 1, THROT_MIN_PWR + (APPR_SPEED - spd) * THROT_PER_MS).
@@ -1469,7 +1491,13 @@ FUNCTION emergencyLanding {
       // A diversion descends.  Not "is not climbing" - descends: level flight
       // under power at the approach speed is a hold, and a hold at 100 m/s over
       // rising ground with a finite tank is just a slower way to arrive.
-      IF VERTICALSPEED > RECOVER_SINK AND ALT:RADAR > TERRAIN_FLOOR { SET gThrot TO 0. }
+      //
+      // The altitude gate that used to be on this line is what let the climb
+      // above be *paid for*: it cut the throttle only above TERRAIN_FLOOR, i.e.
+      // everywhere except the place the ship was being told to climb.  There is
+      // no height at which thrust into a climb is what a landing wants.
+      IF VERTICALSPEED > RECOVER_SINK { SET gThrot TO 0. }
+      IF committed AND VERTICALSPEED > -LAND_SINK { SET gThrot TO 0. }
     }
     IF TIME:SECONDS > tNext {
       PRINT "  divert  alt " + ROUND(ALT:RADAR) + " m" +
