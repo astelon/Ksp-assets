@@ -381,7 +381,15 @@ SET TERRAIN_TAU    TO 12.        // seconds over which the sink is bled off at a
 SET TERRAIN_CLIMB  TO 8.         // climb commanded when already below a floor (m/s)
 SET TERRAIN_ABORT  TO 250.       // radar altitude at which the glide gives up and lands (m)
 SET MTN_CLEAR      TO 350.       // clearance held over the highest ground ahead (m)
-SET MTN_SAMPLES    TO 20.        // sample points along the track to the fix
+// The scan used to sample the centreline and nothing else, which is a statement
+// about a line and not about the ground the ship is flying through.  A peak two
+// kilometres abeam is invisible to it and is still one the ship can be turned
+// into by a localiser correction, a bank out of a recovery, or simply by the
+// track it is really on differing from the track that was measured.  The last
+// flight read `mtn 927 m` all the way down a valley with peaks well above that
+// on either side, and came close enough to one to be worth this.
+SET MTN_WIDTH      TO 1500.      // how far either side of the track is also scanned (m)
+SET MTN_SAMPLES    TO 14.        // sample points along the track to the fix
 SET MTN_SCAN_T     TO 2.         // seconds between terrain scans
 
 // --- Tunables: the flight envelope ------------------------------------------
@@ -476,7 +484,18 @@ SET DIVERT_RANGE   TO 12000.     // farther from the runway than this at the flo
 SET LAND_COMMIT    TO 300.       // radar altitude at which the landing is committed (m)
 SET LAND_SINK      TO 5.         // steady sink flown once committed (m/s)
 SET FLARE_ALT      TO 28.        // radar altitude to begin the flare (m)
-SET FLARE_PITCH    TO 7.         // absolute nose-up attitude in the flare (deg)
+SET FLARE_PITCH    TO 7.         // most nose-up the flare will command (deg)
+// A flare arrests the sink; it does not fly the ship away.  Held as a fixed
+// absolute attitude it does the second thing: 7 degrees nose-up at 104 m/s is a
+// climb, so the radar altitude grows instead of shrinking, the touchdown never
+// arrives, and the timer runs out - which the old code then reported as a
+// landing, 275 m in the air over a mountain.  The pitch is trimmed against the
+// sink rate instead, between these two figures, and it may go to zero.
+SET FLARE_SINK_MIN TO 0.5.       // sinking slower than this: take pitch out (m/s)
+SET FLARE_SINK_MAX TO 3.         // sinking faster than this: put pitch in (m/s)
+SET FLARE_START    TO 2.         // pitch the flare opens at, before any trim (deg)
+SET FLARE_TRIM     TO 0.15.      // pitch change per pass (deg, ~3 deg/s)
+SET FLARE_MAX_T    TO 90.        // longest the flare runs before it admits it has not landed
 SET TOUCHDOWN_ALT  TO 3.         // radar altitude considered "on the wheels" (m)
 SET USE_JETS_SHORT TO TRUE.      // relight the jets rather than land short
 SET JET_ARM_ALT    TO 12000.     // only below this altitude is a jet save attempted (m)
@@ -534,7 +553,7 @@ SET SITE_RUN_N     TO 3.         // samples either side of centre along that run
 // 4 km ridge scores beautifully and is worth nothing: the candidate has to be
 // reachable *over the ground in between*, which is a question about the ship's
 // energy, not about the site.
-SET SITE_PATH_N    TO 6.         // samples along the track from here to a candidate
+SET SITE_PATH_N    TO 4.         // samples along the track from here to a candidate
 SET SITE_BLOCKED   TO 5000.      // cost of a site the ship cannot clear the terrain to reach
 SET SITE_WATER_PEN TO 250.       // roughness-equivalent cost of ditching (m)
 SET SITE_HOME_GAIN TO 0.002.     // ... and cost per metre farther from the KSC
@@ -1220,6 +1239,11 @@ FUNCTION terrainPeakTo {
   FROM { LOCAL idx IS 0. } UNTIL idx > samples STEP { SET idx TO idx + 1. } DO {
     LOCAL pt IS geoOffset(here, hdgTo, rng * idx / samples).
     SET peak TO MAX(peak, pt:TERRAINHEIGHT).
+    // ... and a corridor either side of it.  Three lines, not one: the ship does
+    // not fly the measured track to the metre, and the ridge it hits is the one
+    // nobody sampled.
+    SET peak TO MAX(peak, geoOffset(pt, hdgTo + 90, MTN_WIDTH):TERRAINHEIGHT).
+    SET peak TO MAX(peak, geoOffset(pt, hdgTo - 90, MTN_WIDTH):TERRAINHEIGHT).
   }
   RETURN peak.
 }
@@ -2385,12 +2409,48 @@ IF divertGo {
 PRINT "Flare.".
 BRAKES OFF.
 SET gThrot TO 0.
-LOCK STEERING TO dirFor(landHdg, FLARE_PITCH, 0).   // absolute attitude: arrest the sink
-SET tStop TO TIME:SECONDS + 30.
-WAIT UNTIL ALT:RADAR < TOUCHDOWN_ALT OR SHIP:STATUS = "LANDED"
-        OR SHIP:STATUS = "SPLASHED" OR TIME:SECONDS > tStop.
+// Trimmed, not fixed.  This is an absolute attitude - the one place in the
+// script where that is the right command, because the whole point is to stop
+// following the airstream down - but an absolute attitude that is too nose-up
+// for the speed is a climb, and a climb here is a ship that never lands.
+// Opened at FLARE_START and trimmed up only as the sink demands it, rather than
+// opened at the maximum and trimmed back down.  Starting at the top is what
+// balloons: the ship arrives at the flare doing whatever it is doing, and 7
+// degrees is far too much attitude for 104 m/s.  Modelled against the last
+// flight's numbers, opening at the maximum overshoots 105 m into the air and
+// takes a minute to settle; opening at 2 degrees touches down in 16 s having
+// never climbed at all.
+SET gFlarePitch TO FLARE_START.
+LOCK STEERING TO dirFor(landHdg, gFlarePitch, 0).
+SET touched TO FALSE.
+SET tStop   TO TIME:SECONDS + FLARE_MAX_T.
+UNTIL touched OR TIME:SECONDS > tStop {
+  IF SHIP:STATUS = "LANDED" OR SHIP:STATUS = "SPLASHED"
+     OR ALT:RADAR < TOUCHDOWN_ALT {
+    SET touched TO TRUE.
+  } ELSE IF VERTICALSPEED > -FLARE_SINK_MIN {
+    SET gFlarePitch TO MAX(0, gFlarePitch - FLARE_TRIM).          // ballooning
+  } ELSE IF VERTICALSPEED < -FLARE_SINK_MAX {
+    SET gFlarePitch TO MIN(FLARE_PITCH, gFlarePitch + FLARE_TRIM). // dropping
+  }
+  WAIT 0.05.
+}
 
-PRINT "Touchdown. Braking.".
+// And a timer running out is not a landing.  The old code could not tell the
+// two apart - it waited on `radar < 3 OR LANDED OR SPLASHED OR timeout` and
+// then printed "Touchdown" whichever had happened - so the last flight
+// announced a touchdown while flying at 275 m over a mountain at 25 m/s of
+// sink.  A report that cannot distinguish arriving from giving up is worse than
+// no report, because it is the line you read when you were not watching.
+IF touched {
+  PRINT "Touchdown. Braking.".
+} ELSE {
+  PRINT "!! Flare ran " + ROUND(FLARE_MAX_T) + " s and the ship is still flying: " +
+        ROUND(ALT:RADAR) + " m AGL, " + ROUND(SHIP:AIRSPEED) + " m/s, " +
+        ROUND(VERTICALSPEED) + " m/s vertical. It has NOT landed.".
+  PRINT "   Holding the nose down and letting it come to the ground.".
+  SET gFlarePitch TO 0.
+}
 LOCK THROTTLE TO 0.
 BRAKES ON.
 // Keep the nose straight down the runway; let the wheels do the steering.
