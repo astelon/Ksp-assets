@@ -436,6 +436,13 @@ SET RECOVER_AOA    TO 2.         // AoA held while diving out of a stall (deg)
 // builds a margin.  Six cycles of recover-and-depart is what this costs.
 SET RECOVER_NOSE   TO 20.        // nose back within this of the airstream = flying (deg)
 SET RECOVER_MAX_T  TO 45.        // longest a single recovery attempt runs before re-thinking
+// ... except where the only authority is RCS.  Forty-five seconds is a sensible
+// limit for a wing that has air to bite on; at 40 km it is not nearly enough to
+// swing a heavy airframe back onto its airstream, so the attempt times out, the
+// entry loop takes the ship back still tumbling, hands it a guidance command,
+// and the whole thing starts again.  That is the "several retries to bring the
+// nose up": not a ship that will not recover, a timer that keeps interrupting.
+SET RECOVER_THIN_MULT TO 3.      // recovery time multiplier where there is no air
 SET STEADY_TIME    TO 8.         // wings-level seconds granted after a recovery
 // What makes a recovery *violent* is not the dive - a nose held 2 deg off a
 // steep airstream is exactly what unloading the wing looks like, and it is
@@ -483,6 +490,14 @@ SET DIVERT_RANGE   TO 12000.     // farther from the runway than this at the flo
 // being "recover" and starts being "put it down".
 SET LAND_COMMIT    TO 300.       // radar altitude at which the landing is committed (m)
 SET LAND_SINK      TO 5.         // steady sink flown once committed (m/s)
+// The height a recovery needs to exist at all.  Below it stallRecover returns
+// the instant it is called - its own floor test fires before its loop body runs
+// - so asking for one is not merely useless, it is *silent*: the guidance law
+// lives in the other branch of the same IF, so nothing commands the ship while
+// it happens.  The last flight asked twenty-five times in its final sixty
+// metres, flew all of them on whatever attitude it had last been given, and
+// broke on touchdown at 59 m/s.
+SET LAND_RECOVER_MIN TO 150.     // radar altitude below which there is no recovery to fly (m)
 SET FLARE_ALT      TO 28.        // radar altitude to begin the flare (m)
 SET FLARE_PITCH    TO 7.         // most nose-up the flare will command (deg)
 // A flare arrests the sink; it does not fly the ship away.  Held as a fixed
@@ -991,6 +1006,9 @@ FUNCTION stallRecover {
   LOCAL jets IS USE_JETS_SHORT AND (resAmt("LiquidFuel") > JET_MIN_LF)
               AND SHIP:ALTITUDE < JET_ARM_ALT.
   LOCAL tGiveUp IS TIME:SECONDS + RECOVER_MAX_T.
+  IF SHIP:DYNAMICPRESSURE < RCS_Q_OFF {
+    SET tGiveUp TO TIME:SECONDS + RECOVER_MAX_T * RECOVER_THIN_MULT.
+  }
   // Start from the heading already being flown and walk it, rather than snapping
   // to whatever the tumbling velocity vector reads this frame.
   LOCAL hdgHold IS gHdg.
@@ -1522,9 +1540,15 @@ FUNCTION emergencyLanding {
     // 200 m over a ridge thirty kilometres out, which would fly a landing sink
     // straight into the rock.  Committed means low AND there.
     LOCAL nearSite  IS (NOT gDiverted) OR groundRange(gSite) < SITE_FINAL * 2.
-    LOCAL committed IS ALT:RADAR < LAND_COMMIT AND nearSite.
+    // Committed either because the landing is at hand, or because there is no
+    // longer any height to do anything else in.  The second clause is not a
+    // nicety: without it, a ship that is low but not yet at its site asks for a
+    // recovery it cannot have, over and over, and is commanded by nothing at all
+    // in between.
+    LOCAL committed IS (ALT:RADAR < LAND_COMMIT AND nearSite)
+                       OR ALT:RADAR < LAND_RECOVER_MIN.
     IF SHIP:DYNAMICPRESSURE < STALL_Q AND NOT committed {
-      stallRecover(LAND_COMMIT * 0.5).
+      stallRecover(LAND_RECOVER_MIN).
     } ELSE {
       // A speed is not a flight path here either.  Trimmed for the approach
       // speed and nothing else, the ship is free to hold any trajectory it
@@ -1565,7 +1589,17 @@ FUNCTION emergencyLanding {
           SET ridgeHold TO TRUE.
         }
       }
-      setNav(hdgWant, APPR_AOA + (spd - APPR_SPEED) * AOA_PER_MS
+      // Fly to the space that was chosen, and only then along it.  A fixed
+      // run-in heading is right for the last few kilometres and wrong before
+      // them: if the glide handed over early - out of height rather than at the
+      // fix - the site can still be well off the nose, and holding the heading
+      // flies calmly past the one piece of ground that was measured and found
+      // landable.  That is also why the last flight was never `nearSite`.
+      LOCAL steerTo IS hdgWant.
+      IF gDiverted AND groundRange(gSite) > SITE_FINAL {
+        SET steerTo TO gSite:HEADING.
+      }
+      setNav(steerTo, APPR_AOA + (spd - APPR_SPEED) * AOA_PER_MS
                       + clampVal(-GLIDE_VS_AUTH, GLIDE_VS_AUTH,
                                  (vsWant - VERTICALSPEED) * GLIDE_VS_GAIN),
              GLIDE_AOA_MAX).
