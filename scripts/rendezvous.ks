@@ -65,6 +65,26 @@
 //    station with no way home has not completed a rendezvous.  The reserve is
 //    priced at the mass the deorbit burn will actually be flown at, which -
 //    after the cargo is delivered - is not the mass on the gauge now.
+//  * A RENDEZVOUS CANNOT BE HALF-DONE.  The reserve above says where a burn
+//    stops; this says which burn is allowed to be the one that stops there.
+//    Every phase up to the transfer injection ends in a circular orbit the
+//    ship can sit in, so flying one on a short budget wastes propellant and
+//    nothing else.  The arrival burn is different: everything spent getting to
+//    the intercept is spent buying a relative velocity that then has to be
+//    paid off, and an arrival burn cut short does not deliver a partial
+//    rendezvous - it delivers a flyby, at speed, with the tanks empty and the
+//    target receding.  So the arrival is priced into the bill, priced again
+//    from the real geometry at the point of no return, and the injection is
+//    refused unless it is funded.  Refusing to go is a result.  Going and not
+//    arriving is worse than either.
+//  * THE PLAN IS SEARCHED UNDER THE BUDGET, NOT PRICED AFTER IT.  Both the
+//    phasing sweep and the transfer refinement carry the cost of arriving in
+//    their objective.  A hill-climb told only to minimise the miss will buy a
+//    steeper, faster intercept every round, because a steeper one aims better
+//    - and spend the arrival burn's propellant doing it, before the arrival
+//    burn is lit.  When nothing inside MAX_TOTAL_TIME can be paid for, the
+//    sweep looks further out rather than flying something it cannot finish:
+//    waiting is free and propellant is not.
 //  * PAYLOAD FUEL IS NOT OUR FUEL.  Same part-tree walk ascent.ks does, and it
 //    matters more here: on a station run the payload usually *is* propellant,
 //    and counting the cargo's tanks as budget would fund a rendezvous with fuel
@@ -128,8 +148,12 @@ SET FORCE_TANK_LOCK     TO FALSE. // also disable flow on payload tanks (only
                                   // toggle; remember to re-enable on deploy)
 SET ABORT_IF_INFEASIBLE TO FALSE. // TRUE = do not leave the parking orbit at
                                   // all once the rendezvous is priced out of
-                                  // reach.  FALSE = fly it and stop at the
-                                  // reserve, which never burns dry either
+                                  // reach.  FALSE = set off anyway on the
+                                  // recoverable half of the plan.  Either way
+                                  // the transfer injection is refused unless
+                                  // the arrival that follows it is paid for -
+                                  // see phase 4c.  A rendezvous is not a thing
+                                  // you can do most of
 SET GO_MARGIN           TO 0.10.  // dV in hand, as a fraction of the bill,
                                   // below which the answer is MARGINAL, not GO
 SET PREFLIGHT_HOLD      TO 12.    // pause this long on a failed check (s)
@@ -151,6 +175,12 @@ SET ALIGN_TOL      TO 5.          // steering error accepted before burning (deg
 SET MAX_TOTAL_TIME TO 7200.       // longest rendezvous the solver will accept
                                   // (s).  Raise it to be allowed cheaper, more
                                   // patient plans; lower it to be in a hurry
+SET MAX_TIME_PATIENT TO 28800.    // ... and the horizon it is allowed to fall
+                                  // back to when nothing inside MAX_TOTAL_TIME
+                                  // can be paid for (s).  Waiting is free and
+                                  // propellant is not, so a plan that costs
+                                  // four more hours and fits the tanks beats
+                                  // a quick one that runs out at the target
 SET PHASE_GRID     TO 40.         // candidate phasing radii tried per side
 SET PHASE_R_SPAN   TO 0.35.       // how far from the target's radius the search
                                   // may roam, as a fraction of it
@@ -172,6 +202,18 @@ SET MIDCOURSE_FRAC TO 0.35.       // fraction of the way across to correct at
 SET MIDCOURSE_MIN  TO 500.        // do not bother correcting a miss under this (m)
 
 // --- Arrival ----------------------------------------------------------------
+SET ARRIVE_DV_ALLOW TO 40.        // budgeted allowance for the arrival burn on
+                                  // top of the transfer's own closing burn
+                                  // (m/s).  The closed-form second burn prices
+                                  // a tangential arrival into a circular orbit
+                                  // and the ship never arrives quite like that;
+                                  // this is what the difference is allowed to be
+SET ARRIVE_DV_FLOOR TO 5.         // slack left over the predicted arrival cost
+                                  // when deciding whether to commit (m/s).  It
+                                  // pays for the mid-course and for the
+                                  // prediction being a prediction
+SET TERM_V_MARGIN  TO 1.25.       // the terminal phase wants this much more
+                                  // budget than the residual it has to null
 SET ARRIVE_V_TOL   TO 0.4.        // relative speed the arrival burn stops at (m/s)
 SET RCS_HANDOVER   TO 4.          // below this remaining dV the arrival burn is
                                   // flown on RCS instead of the main engines (m/s)
@@ -440,6 +482,26 @@ FUNCTION monoDv {
   RETURN RCS_ISP_FALLBACK * G0 * LN(m0 / m1).
 }
 
+// The part of it that is actually ours to spend.  MONO_RESERVE is not a low
+// fuel warning, it is propellant already promised to station-keeping, so a
+// decision about whether the approach can be flown must be taken on what is
+// left above it and not on what the gauge reads.
+FUNCTION monoDvUsable {
+  LOCAL amt IS MAX(0, resAmtShip("MonoPropellant") - MONO_RESERVE).
+  LOCAL m0  IS SHIP:MASS.
+  LOCAL m1  IS m0 - amt * MONO_DENS.
+  IF m0 <= 0 OR m1 <= 0 OR m1 >= m0 { RETURN 0. }
+  RETURN RCS_ISP_FALLBACK * G0 * LN(m0 / m1).
+}
+
+// Main-engine dV that may be spent without touching the reserve.  Every "can
+// we still do this" question below is asked in these terms rather than in
+// gauge readings, because the gauge includes the ride home.
+FUNCTION rocketDvUsable {
+  PARAMETER floorDv.
+  RETURN MAX(0, rocketDv() - floorDv).
+}
+
 FUNCTION burnTimeFor {              // seconds to spend dvNeed at full throttle
   PARAMETER dvNeed.
   LOCAL thr IS SHIP:AVAILABLETHRUST.
@@ -557,6 +619,18 @@ FUNCTION orbVelAt {
 FUNCTION missAt {
   PARAMETER tUT.
   RETURN (POSITIONAT(SHIP, tUT) - POSITIONAT(tgtVes, tUT)):MAG.
+}
+
+// Relative speed at a future time - what the arrival burn will have to pay to
+// stop.  Like missAt this reads through any planned node, so it prices the
+// intercept a candidate transfer would actually deliver rather than the one
+// the closed-form plan imagined.  It is the number the refinement below was
+// missing: a hill-climb that only minimises the miss will gladly trade a slow
+// tangential arrival for a fast steep one, and the ship pays for that trade at
+// the far end, in the burn there is least propellant left for.
+FUNCTION relVelAt {
+  PARAMETER tUT.
+  RETURN (orbVelAt(SHIP, tUT) - orbVelAt(tgtVes, tUT)):MAG.
 }
 
 // Closest approach inside a window: a coarse sweep for the basin, then a
@@ -897,6 +971,10 @@ SET thrCmd TO 0.                    // every burn loop writes this; the throttle
                                     // own locals
 SET brakeHard TO FALSE.             // set when the approach needs main-engine
                                     // braking - see approachSteer()
+SET abortWhy  TO "".                // why the flight stopped short, if it did,
+                                    // so the closing report can say it rather
+                                    // than leave the pilot to guess from the
+                                    // last line that happened to print
 LOCK THROTTLE TO 0.
 SAS OFF.
 
@@ -1031,14 +1109,35 @@ IF tgtFound {
     //  different orbit, it usually is.  Against one in *our* orbit the phase
     //  rate is zero, the wait is infinite, and the sweep is the only thing
     //  standing between the ship and a rendezvous that never happens.
+    //
+    //  The sweep also asks, of every candidate, whether the tanks can pay for
+    //  it - and that is a search constraint, not a verdict to print afterwards.
+    //  MAX_TOTAL_TIME is a preference; propellant is a fact.  A plan that fits
+    //  the clock and not the tanks is not a plan, so when the cheapest thing
+    //  inside the time limit cannot be afforded the sweep looks further out
+    //  instead, to MAX_TIME_PATIENT, and takes the soonest one that can be.
     SET omegaT TO 360 / tgtVes:OBT:PERIOD.        // deg/s, target
     SET phiNow TO phaseAngleAt(TIME:SECONDS).
+
+    // Priced here so the sweep can weigh each candidate against them.  The
+    // reserve is what must survive the whole rendezvous; the two allowances
+    // are the corrections and the arrival burn, neither of which the closed-
+    // form transfer dV covers.
+    SET reserveDv TO reserveDvAtR(rTgt).
+    SET haveDv    TO rocketDv().
+    SET fixedDv   TO planeDv + CORR_DV_ALLOW + ARRIVE_DV_ALLOW + reserveDv.
 
     SET bestR  TO 0.
     SET bestDv TO 0.
     SET bestT  TO 0.
     SET bestWait TO 0.
     SET bestFound TO FALSE.
+    SET bestAfford TO FALSE.
+    SET patR TO 0.
+    SET patDv TO 0.
+    SET patT TO 0.
+    SET patWait TO 0.
+    SET patFound TO FALSE.
     SET anyR TO 0.
     SET anyT TO 0.
     SET anyDv TO 0.
@@ -1076,6 +1175,7 @@ IF tgtFound {
         IF waitT >= 0 {
           LOCAL dvAll IS dvMove + hohmannDv(rP, rTgt).
           LOCAL tAll  IS tMove + waitT + tTrans.
+          LOCAL canPay IS (dvAll + fixedDv) <= haveDv.
           IF (NOT anyFound) OR tAll < anyT {
             SET anyFound TO TRUE. SET anyR TO rP. SET anyT TO tAll.
             SET anyDv TO dvAll. SET anyWait TO waitT.
@@ -1087,10 +1187,48 @@ IF tgtFound {
               SET bestDv TO dvAll.
               SET bestT TO tAll.
               SET bestWait TO waitT.
+              SET bestAfford TO canPay.
+            }
+          }
+          // The patient pool: anything the tanks can actually pay for, out to
+          // the longer horizon, ranked by how soon it parks us.  Waiting costs
+          // nothing that cannot be warped through.
+          IF canPay AND tAll <= MAX_TIME_PATIENT {
+            IF (NOT patFound) OR tAll < patT {
+              SET patFound TO TRUE.
+              SET patR TO rP.
+              SET patDv TO dvAll.
+              SET patT TO tAll.
+              SET patWait TO waitT.
             }
           }
         }
       }
+    }
+
+    // The cheapest plan inside the time limit is the one we want, but only if
+    // it can be flown to the end.  If it cannot and a slower one can, take the
+    // slower one: this script used to print "raise MAX_TOTAL_TIME and re-run"
+    // at exactly this moment, which is advice a pilot cannot act on without
+    // throwing away the orbit they are in.  Do it here instead.
+    IF rangeNow >= NEAR_ALREADY AND patFound AND
+       ((NOT bestFound) OR (NOT bestAfford)) {
+      IF bestFound {
+        PRINT "!! The quickest plan (" + ROUND(bestT / 60) + " min, " +
+              ROUND(bestDv + fixedDv) + " m/s all in) costs more than the " +
+              ROUND(haveDv) + " m/s aboard.".
+      } ELSE {
+        PRINT "!! Nothing fits inside " + ROUND(MAX_TOTAL_TIME / 3600, 1) +
+              " h that the tanks can also pay for.".
+      }
+      PRINT "   Waiting longer instead: " + ROUND(patT / 60) +
+            " min, " + ROUND(patDv + fixedDv) + " m/s all in.".
+      SET bestFound TO TRUE.
+      SET bestAfford TO TRUE.
+      SET bestR TO patR.
+      SET bestDv TO patDv.
+      SET bestT TO patT.
+      SET bestWait TO patWait.
     }
 
     IF NOT bestFound AND anyFound {
@@ -1126,9 +1264,16 @@ IF tgtFound {
     }
 
     // --- 0e. The bill -------------------------------------------------------
+    //  ARRIVE_DV_ALLOW is in here because the closed-form transfer dV is not
+    //  the whole cost of arriving.  Its second burn prices a tangential
+    //  arrival into a circular orbit at the target's radius; the transfer the
+    //  ship actually flies has been bent to hit the target where it will be,
+    //  and the relative velocity that leaves is larger - sometimes several
+    //  times larger.  Leaving that off the bill is how a rendezvous gets a GO
+    //  and then runs out of propellant in the one burn that matters.
     SET termDv    TO 2 * V_CLOSE_MAX + 2 * ARRIVE_V_TOL.
     SET reserveDv TO reserveDvAtR(rTgt).
-    SET billDv    TO planeDv + bestDv + CORR_DV_ALLOW.
+    SET billDv    TO planeDv + bestDv + CORR_DV_ALLOW + ARRIVE_DV_ALLOW.
     IF rangeNow < NEAR_ALREADY { SET billDv TO 0. }
     SET needDv    TO billDv + reserveDv.
     SET haveDv    TO rocketDv().
@@ -1154,6 +1299,8 @@ IF tgtFound {
       PRINT "  Transfer      : " + ROUND(bestDv, 1) +
             " m/s  (phasing + Hohmann, both ends)".
       PRINT "  Corrections   : " + ROUND(CORR_DV_ALLOW) + " m/s allowed".
+      PRINT "  Arrival       : " + ROUND(ARRIVE_DV_ALLOW) +
+            " m/s allowed on top of the transfer's own closing burn".
     }
     PRINT "  Terminal      : " + ROUND(termDv) + " m/s on RCS (" +
           ROUND(termDv * SHIP:MASS / MAX(0.001, RCS_ISP_FALLBACK * G0) /
@@ -1176,8 +1323,10 @@ IF tgtFound {
       }
     } ELSE {
       PRINT "  => NOT ENOUGH dV - short by " + ROUND(needDv - haveDv) + " m/s.".
-      PRINT "     * A longer wait is cheaper: raise MAX_TOTAL_TIME and re-run.".
-      PRINT "     * Or deliver the payload first if it is going to the station".
+      PRINT "     The sweep already looked out to " +
+            ROUND(MAX_TIME_PATIENT / 3600, 1) +
+            " h for a cheaper plan and found none.".
+      PRINT "     * Deliver the payload first if it is going to the station".
       PRINT "       anyway - the reserve is most of this bill at this mass.".
       IF ABS(bestR - rShipNow) >= 1000 {
         PRINT "     * The phasing detour costs " +
@@ -1197,7 +1346,14 @@ IF tgtFound {
       handBack().
       SET tgtOk TO FALSE.
     } ELSE IF NOT feasible {
-      PRINT "Flying it anyway - every burn stops at the reserve.".
+      // Setting off is not the same as committing.  The plane change and the
+      // phasing burns all end in a circular orbit the ship can live in, so
+      // flying them on a short budget costs propellant and nothing else.  The
+      // transfer injection is the one that cannot be taken back, and phase 4c
+      // refuses it unless the arrival at the far end is funded - so this is
+      // not a licence to fly the whole thing on hope.
+      PRINT "Setting off anyway. Every burn stops at the reserve, and the".
+      PRINT "transfer will not be committed to unless the arrival is paid for.".
       IF PREFLIGHT_HOLD > 0 { WAIT PREFLIGHT_HOLD. }
     }
   }
@@ -1379,7 +1535,17 @@ IF tgtFound {
       SET tTrans TO hohmannTime(rB, rTgt).
       SET caNow  TO closestApproach(TIME:SECONDS + PHASE_LEAD,
                                     TIME:SECONDS + PHASE_LEAD + tTrans * 1.6).
-      PRINT "  Closed-form plan misses by " + ROUND(caNow["d"] / 1000, 1) + " km.".
+      SET arrNow TO relVelAt(caNow["t"]).
+      PRINT "  Closed-form plan misses by " + ROUND(caNow["d"] / 1000, 1) +
+            " km, arriving at " + ROUND(arrNow) + " m/s.".
+
+      //  What the rest of the rendezvous is allowed to cost.  Everything after
+      //  this point is spent out of one purse: the injection itself, the mid-
+      //  course, and the arrival burn that stops the ship at the far end.  A
+      //  transfer is only worth planning inside it.
+      SET xferPurse TO rocketDvUsable(reserveDv) - CORR_DV_ALLOW.
+      PRINT "  Budget from here: " + ROUND(xferPurse) +
+            " m/s for the injection and the arrival together.".
 
       // --- 4b. Refine it against the real geometry -------------------------
       //  The node's ETA is a *countdown*, not a timestamp: it shrinks as the
@@ -1387,10 +1553,19 @@ IF tgtFound {
       //  would quietly walk the node later every round.  The wanted burn time
       //  is therefore held as an absolute UT and the countdown is derived from
       //  it each time it is written.
+      //
+      //  The search is scored on the miss AND on what the intercept costs to
+      //  stop at.  Miss alone is the wrong objective and was the bug that put
+      //  this ship past its station at seventy-odd metres a second: hitting a
+      //  point is easy if you are allowed to arrive at any speed you like, and
+      //  a hill-climb given a free hand will steepen the transfer round after
+      //  round because a steeper one aims better.  Every one of those rounds
+      //  spends the arrival burn's propellant before the arrival burn is lit.
       IF nodePredOk {
         SET stepDv TO REFINE_DV0.
         SET stepDt TO REFINE_DT0.
         SET bestMiss TO caNow["d"].
+        SET bestCost TO ndX:DELTAV:MAG + arrNow.
         SET ndAbsT TO TIME:SECONDS + ndX:ETA.
         FROM { LOCAL rnd IS 0. } UNTIL rnd >= REFINE_ROUNDS STEP { SET rnd TO rnd + 1. } DO {
           SET improved TO FALSE.
@@ -1412,8 +1587,27 @@ IF tgtFound {
               WAIT 0.
               SET tryCa TO closestApproach(TIME:SECONDS + ndX:ETA,
                                            TIME:SECONDS + ndX:ETA + tTrans * 1.6).
-              IF tryCa["d"] < bestMiss {
+              SET tryCost TO ndX:DELTAV:MAG + relVelAt(tryCa["t"]).
+
+              //  Two regimes, and which one applies is decided by the best so
+              //  far, not by the trial - otherwise a trial that misses by
+              //  miles is judged on price and wins for being cheap.
+              //    Still short of an intercept: take the smaller miss, but
+              //    never one the purse cannot cover.
+              //    Already intercepting: keep it that way and get cheaper.
+              SET takeIt TO FALSE.
+              IF bestMiss > INTERCEPT_DIST {
+                IF tryCa["d"] < bestMiss AND
+                   (tryCost <= xferPurse OR tryCost < bestCost) {
+                  SET takeIt TO TRUE.
+                }
+              } ELSE IF tryCa["d"] < INTERCEPT_DIST AND tryCost < bestCost - 0.05 {
+                SET takeIt TO TRUE.
+              }
+
+              IF takeIt {
                 SET bestMiss TO tryCa["d"].
+                SET bestCost TO tryCost.
                 SET caNow TO tryCa.
                 SET improved TO TRUE.
               } ELSE {
@@ -1430,18 +1624,48 @@ IF tgtFound {
             SET stepDt TO stepDt / 2.
           }
           IF stepDv < REFINE_FLOOR { BREAK. }
-          IF bestMiss < INTERCEPT_DIST { BREAK. }
+          // Stop once the plan both hits and can be paid for.  Stopping on the
+          // miss alone, as this used to, walks away from a plan that arrives
+          // faster than the tanks can stop.
+          IF bestMiss < INTERCEPT_DIST AND bestCost <= xferPurse { BREAK. }
         }
+        SET arrNow TO relVelAt(caNow["t"]).
         PRINT "  Refined to a " + ROUND(bestMiss / 1000, 2) + " km miss for " +
-              ROUND(ndX:DELTAV:MAG, 1) + " m/s.".
+              ROUND(ndX:DELTAV:MAG, 1) + " m/s, arriving at " +
+              ROUND(arrNow) + " m/s.".
       } ELSE {
         PRINT "  !! This install does not fold maneuver nodes into its".
         PRINT "     predictions - flying the closed-form plan unrefined and".
         PRINT "     letting the mid-course correction clean up.".
       }
 
-      IF NOT execNode(ndX, "Transfer injection", reserveDv) { SET goOn TO FALSE. }
-      clearNodes().
+      // --- 4c. The point of no return --------------------------------------
+      //  Everything above this line ends in a circular orbit the ship can sit
+      //  in, top up in, or deorbit from.  Below it the ship is on a transfer
+      //  that arrives somewhere at a relative velocity somebody has to pay to
+      //  stop, and a transfer flown with nothing left for the arrival does not
+      //  buy a partial rendezvous - it buys a flyby, and it spends the orbit
+      //  the ship had to do it.  The reserve is defended here, by not going,
+      //  rather than at the far end by cutting the arrival burn short.
+      SET arrCost TO relVelAt(caNow["t"]) + ARRIVE_DV_FLOOR.
+      SET dvAfter TO rocketDv() - ndX:DELTAV:MAG - reserveDv.
+      IF dvAfter < arrCost {
+        PRINT "  !! NOT COMMITTING to this transfer.".
+        PRINT "     The injection costs " + ROUND(ndX:DELTAV:MAG) +
+              " m/s and would leave " + ROUND(MAX(0, dvAfter)) + " m/s over the".
+        PRINT "     reserve; stopping at the target needs " + ROUND(arrCost) +
+              " m/s. Short by " + ROUND(arrCost - dvAfter) + " m/s.".
+        PRINT "     Holding this orbit with the reserve intact. Refuel, drop the".
+        PRINT "     payload, or run again from a lower orbit.".
+        SET abortWhy TO "arrival unfunded".
+        SET goOn TO FALSE.
+        clearNodes().
+      }
+
+      IF goOn {
+        IF NOT execNode(ndX, "Transfer injection", reserveDv) { SET goOn TO FALSE. }
+        clearNodes().
+      }
     }
 
     // --- 5. MID-COURSE CORRECTION ------------------------------------------
@@ -1559,7 +1783,8 @@ IF tgtFound {
         ELSE IF rocketDv() <= reserveDv {
           SET killing TO FALSE.
           SET thrCmd TO 0.
-          PRINT "  !! Arrival burn stopped on the reserve - finishing on RCS.".
+          PRINT "  !! Arrival burn stopped on the reserve with " +
+                ROUND(vRelMag, 1) + " m/s still on.".
         } ELSE {
           // Only push while the nose is actually on the braking vector: thrust
           // applied off-axis does not slow the ship down, it steers it into a
@@ -1575,8 +1800,38 @@ IF tgtFound {
       }
       SET thrCmd TO 0.
       LOCK THROTTLE TO 0.
-      PRINT "  Relative velocity down to " +
-            ROUND((SHIP:VELOCITY:ORBIT - tgtVes:VELOCITY:ORBIT):MAG, 2) + " m/s.".
+      SET vResid TO (SHIP:VELOCITY:ORBIT - tgtVes:VELOCITY:ORBIT):MAG.
+      PRINT "  Relative velocity down to " + ROUND(vResid, 2) + " m/s.".
+
+      // --- 6b. Is there an approach left to fly? ----------------------------
+      //  The terminal phase assumes the arrival burn did its job: it is a
+      //  station-keeping controller with a closing schedule bolted on, and it
+      //  is flown on thrusters worth a few m/s.  Handing it a residual it
+      //  cannot null does not produce a slower rendezvous, it produces a
+      //  flyby with the monopropellant spent - the ship coasts past the
+      //  station, the RCS empties into a velocity it was never going to
+      //  change, and what is left drifts away with no way to stop.  If the
+      //  budget will not cover the residual, do not start.
+      //
+      //  The test is the residual and nothing else.  Closing is incremental -
+      //  a ship that runs out of mono halfway in is closer than it was, and
+      //  the loop below stops at MONO_RESERVE and says where it got to.
+      //  Nulling is not: it either happens or the ship goes past.  So a budget
+      //  that covers the residual but not the whole transit is still worth
+      //  spending, and only a budget that cannot null is a reason not to start.
+      SET vBudget TO monoDvUsable() + rocketDvUsable(reserveDv).
+      SET vWanted TO vResid * TERM_V_MARGIN.
+      IF vResid > PARK_V_TOL AND vBudget < vWanted {
+        PRINT "  !! NOT CLOSING. " + ROUND(vResid, 1) +
+              " m/s of relative velocity left and " + ROUND(vBudget, 1) +
+              " m/s to null it with".
+        PRINT "     (" + ROUND(rocketDvUsable(reserveDv), 1) +
+              " m/s over the reserve, " + ROUND(monoDvUsable(), 1) +
+              " m/s of usable mono). This is a flyby, not an approach.".
+        PRINT "     Keeping what is left rather than spending it on a pass.".
+        SET abortWhy TO "arrival burn ran out - flyby".
+        SET goOn TO FALSE.
+      }
     }
 
     // --- 7. TERMINAL APPROACH ----------------------------------------------
@@ -1673,6 +1928,16 @@ IF tgtFound {
           } ELSE {
             SET thrCmd TO 0.
           }
+          // Called for the main engine and there is none to be had, with more
+          // closing speed than the thrusters can pay off: the pass is going to
+          // happen whatever this loop does next.  Stop here with the mono still
+          // aboard, because after the pass it is the only thing that can hold
+          // the ship anywhere at all.
+          IF rocketDv() <= reserveDv AND
+             monoDvUsable() < ABS(vClose) * TERM_V_MARGIN {
+            SET closing TO FALSE.
+            SET whyStop TO "unstoppable".
+          }
         } ELSE {
           SET thrCmd TO 0.
         }
@@ -1717,8 +1982,16 @@ IF tgtFound {
       IF whyStop = "mono" {
         PRINT "  !! Stopped at " + ROUND((tgtVes:POSITION):MAG) +
               " m - monopropellant down to MONO_RESERVE.".
+        SET abortWhy TO "monopropellant".
       } ELSE IF whyStop = "timeout" {
         PRINT "  !! Approach timed out at " + ROUND((tgtVes:POSITION):MAG) + " m.".
+        SET abortWhy TO "approach timed out".
+      } ELSE IF whyStop = "unstoppable" {
+        PRINT "  !! Stopped at " + ROUND((tgtVes:POSITION):MAG) +
+              " m - closing faster than anything left aboard can brake.".
+        PRINT "     Expect to pass the target. The mono is being kept for".
+        PRINT "     station-keeping afterwards rather than spent on the pass.".
+        SET abortWhy TO "closing faster than it can brake".
       }
     }
 
@@ -1728,11 +2001,24 @@ IF tgtFound {
     SET vRelFin TO (SHIP:VELOCITY:ORBIT - tgtVes:VELOCITY:ORBIT):MAG.
     IF distFin < PARK_DIST + PARK_BAND * 4 AND vRelFin < 1 {
       PRINT "PARKED ALONGSIDE " + tgtVes:NAME.
+    } ELSE IF abortWhy <> "" {
+      PRINT "RENDEZVOUS INCOMPLETE :: " + abortWhy + ".".
     } ELSE {
       PRINT "RENDEZVOUS INCOMPLETE - handing back where we are.".
     }
     PRINT "  Range      : " + ROUND(distFin, 1) + " m".
     PRINT "  Rel speed  : " + ROUND(vRelFin, 3) + " m/s".
+    // A relative velocity that is still on is a range that is still changing.
+    // Say which way, because "range 1.3 km" reads like an arrival and this is
+    // very often a departure.
+    IF vRelFin > 1 {
+      IF VDOT(SHIP:VELOCITY:ORBIT - tgtVes:VELOCITY:ORBIT,
+              tgtVes:POSITION:NORMALIZED) < 0 {
+        PRINT "               (opening - the range is growing)".
+      } ELSE {
+        PRINT "               (closing)".
+      }
+    }
     PRINT "  Our orbit  : " + ROUND(SHIP:APOAPSIS / 1000, 2) + " x " +
           ROUND(SHIP:PERIAPSIS / 1000, 2) + " km, inc " +
           ROUND(SHIP:ORBIT:INCLINATION, 3) + " deg".
@@ -1741,7 +2027,11 @@ IF tgtFound {
           ROUND(tgtVes:OBT:INCLINATION, 3) + " deg".
     PRINT "  Rel inc    : " + ROUND(relIncDeg(), 4) + " deg".
 
-    resourceReport("parked, rendezvous complete").
+    IF distFin < PARK_DIST + PARK_BAND * 4 AND vRelFin < 1 {
+      resourceReport("parked, rendezvous complete").
+    } ELSE {
+      resourceReport("rendezvous incomplete").
+    }
 
     SET dvNow  TO rocketDv().
     SET dvHome TO reserveDvAtR(BODY_R + SHIP:ALTITUDE).
@@ -1758,8 +2048,14 @@ IF tgtFound {
       PRINT "  RELEASE THE PAYLOAD FIRST - that is what these numbers assume.".
     }
     PRINT "======================================================".
-    PRINT "Docking is not this script's job: select the target port and run".
-    PRINT "the docking script. RCS is left on and the nose is on the target.".
+    IF distFin < PARK_DIST + PARK_BAND * 4 AND vRelFin < 1 {
+      PRINT "Docking is not this script's job: select the target port and run".
+      PRINT "the docking script. RCS is left on and the nose is on the target.".
+    } ELSE {
+      PRINT "Not parked, so there is nothing here for a docking script to".
+      PRINT "inherit. The orbit is safe and the reserve is intact; fix the".
+      PRINT "shortfall above and RUN rendezvous. again from here.".
+    }
 
     handBack().
     RCS ON.
