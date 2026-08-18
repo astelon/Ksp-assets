@@ -228,6 +228,56 @@ drifting. See [`docs/RENDEZVOUS.md`](RENDEZVOUS.md) for the full derivation, the
 tunables, and how the geometry and the approach law were verified outside the
 game.
 
+### Docking
+
+```
+RUN dock.               // both ports as they are set up in the game
+RUN dock("dorsal").     // or name our port, by part tag or title
+RUN dock("", 60).       // ...and force the standoff distance, in metres
+```
+
+**Two things to set in the game first**, and the script will tell you off for
+either one missing:
+
+1. **Target the port**, not the vessel — right-click the port you want to dock
+   with and *Set as Target*.
+2. **Control from your port** — right-click the ship's own docking port and
+   *Control From Here*. The script does this for you when it can work out which
+   port you mean, but it will not guess between two of them.
+
+Neither ship has to be lined up. The script assumes they are not, and will start
+from anywhere inside physics range: in front of the port, alongside, or behind
+the station.
+
+Sequence: identify and validate both ports → open our shield → measure both
+craft and draw a keep-out sphere from their part trees → price the approach in
+monopropellant, GO / MARGINAL / NOT ENOUGH → route to a standoff point on the
+target port's axis, *around* the station rather than through it → match the port
+axes → close down the corridor inside a narrowing cone → coast the last half
+metre onto the magnets → report.
+
+The parts worth understanding before you run it:
+
+* **The approach is routed, not aimed.** The only way into a port is straight
+  out in front of it, so the path is three legs — out sideways to a clear
+  radius, forward past the port's plane, then in along the axis. Each leg either
+  increases the distance to the station or holds it constant.
+* **The keep-out sphere is measured.** Farthest part of the target from its
+  port, plus farthest part of ours from ours, plus slack. A big station gets a
+  wide berth automatically, and so does a long spaceplane swinging its tail
+  round at the standoff.
+* **It never closes while misaligned.** The axial closing rate is zero unless
+  the ship is inside a cone that narrows with the range left *and* the two port
+  axes are within a few degrees. Lateral first, angle second, gap last.
+* **The speed is what the RCS can stop from**, measured in flight, exactly as in
+  the rendezvous. An arrival it *cannot* stop from is refused before anything
+  moves rather than discovered at two metres.
+
+If it stops without docking it says why and leaves the ship lined up and still,
+which is the easiest possible state to finish by hand. See
+[`docs/DOCKING.md`](DOCKING.md) for the geometry, the tunables, and the
+simulation that found two real defects in the first version of the control law.
+
 ### Home again
 
 ```
@@ -490,6 +540,14 @@ Writing `rendezvous.ks` walked straight into the same trap from a new direction:
 `TRANSFER`, `VESSEL`, `NODE` and `TARGET` are every one of them words you reach
 for while writing a rendezvous, and all four are taken. Run the checker.
 
+One thing the checker **cannot** see, and `dock.ks` is full of reasons to care:
+do not assume `AND` and `OR` stop evaluating once the answer is known. A guard
+written as `IF thing:HASSUFFIX("X") AND thing:X > 0` is not a guard at all if
+the right-hand side is evaluated anyway — and the whole point of asking
+`HASSUFFIX` is that reading the suffix might not be safe. Nest the `IF`s
+instead. Every suffix in `dock.ks` that a given kOS version might not have is
+reached that way.
+
 ---
 
 ## Manual flight (no kOS)
@@ -534,10 +592,9 @@ for while writing a rendezvous, and all four are taken. Run the checker.
   cockpit. Open the shield (AG 3), enable **RCS (R)**, approach your station's
   port from below/alongside, and dock. The 8 RV-105 blocks + monopropellant give
   full translation control.
-  `RUN rendezvous.` will do everything up to this point for you — it parks a few
-  hundred metres out with the relative velocity dead, the nose on the target and
-  RCS on, which is the state the last few hundred metres want to start from. It
-  stops there deliberately: choosing a port at both ends is a different problem
-  and gets its own script.
+  `RUN rendezvous.` parks a few hundred metres out with the relative velocity
+  dead and RCS on; `RUN dock.` takes it from there to a hard dock, once you have
+  targeted the station's port and set Control From Here on ours. Close the
+  shield again (AG 3) before reentry.
 * **Power**: the 4 RTGs supply power indefinitely; the Z-4K banks cover peaks.
   You can leave the ship parked without worrying about batteries.
