@@ -205,22 +205,37 @@ for it waits forever. So the script sweeps candidate phasing radii, prices each
 whose total time fits `MAX_TOTAL_TIME`. Your current orbit is one of the
 candidates, so "just wait here" wins whenever it is affordable.
 
-**If a plan looks expensive, give it more time.** `MAX_TOTAL_TIME` defaults to
-two hours; raising it routinely finds plans that cost a fraction as much. The
-budget block prints the phasing orbit it chose and what the detour cost, so the
-trade is visible before anything burns.
+**If a plan looks expensive, give it more time** — though the script now does
+this for you. Every candidate is priced against the tanks as well as the clock,
+and if the cheapest plan inside `MAX_TOTAL_TIME` (two hours) cannot be paid for
+then none inside it can, so the sweep looks out to `MAX_TIME_PATIENT` (eight
+hours) and takes the soonest plan it can actually afford. Raising
+`MAX_TOTAL_TIME` yourself still routinely finds plans that cost a fraction as
+much. The budget block prints the phasing orbit it chose and what the detour
+cost, so the trade is visible before anything burns.
 
-Two safety properties are worth knowing about:
+Three safety properties are worth knowing about:
 
 * **Nothing spends the deorbit reserve.** Every burn is policed against the fuel
   needed to get home, priced at the mass the deorbit will actually be flown at —
   i.e. *after* the cargo comes off at the station. A burn that would breach it
   stops and says so.
+* **A rendezvous is not something you can do most of.** Everything up to the
+  transfer injection ends in a circular orbit the ship can live in; the
+  injection itself is the point of no return, because everything spent reaching
+  the intercept buys a relative velocity that has to be paid off at the far end.
+  So immediately before committing, the script measures what stopping will
+  actually cost from the planned geometry, and **refuses the injection** if the
+  tanks will not cover it — holding the orbit it is in, with the reserve intact,
+  and saying by how much it was short. An arrival burn cut short does not
+  produce a partial rendezvous, it produces a flyby with the propellant gone.
 * **The approach speed is what the ship can stop from**, computed from the
   translational authority the RCS really has at the mass really aboard. If the
   ship somehow arrives closing faster than the thrusters can brake, the main
   engine comes back on and the nose swings onto the braking vector until it is
-  back inside the envelope.
+  back inside the envelope. If nothing aboard can null the residual, the
+  approach does not start at all and the remaining mono is kept for
+  station-keeping.
 
 Monopropellant is budgeted separately and reported separately — the approach is
 flown on RCS, and running mono dry a hundred metres off a station leaves the ship

@@ -68,10 +68,28 @@ station in a genuinely different orbit, it usually is.
 Dropping to a lower orbit to catch up is therefore a decision with a number
 attached, and the script prints the number.
 
-The two knobs that matter:
+### Affordability is a search constraint, not a verdict
+
+Every candidate is also priced against the tanks, right there in the sweep:
+plane change, the candidate's own two burns, the correction and arrival
+allowances, and the reserve, all against the ΔV aboard. **`MAX_TOTAL_TIME` is a
+preference; propellant is a fact.**
+
+If the cheapest plan inside the time limit cannot be paid for then no plan
+inside the time limit can — it was the cheapest — so the sweep looks further
+out, to `MAX_TIME_PATIENT` (default 8 h), and takes the **soonest plan it can
+actually afford**. An earlier version of this script printed *"a longer wait is
+cheaper: raise `MAX_TOTAL_TIME` and re-run"* at exactly this moment, which is
+advice a pilot in orbit cannot act on without throwing away the flight. Waiting
+is free and can be warped through; running out of propellant at the target
+cannot.
+
+The three knobs that matter:
 
 * **`MAX_TOTAL_TIME`** (default 2 h). Patience is cheap and hurry is expensive.
   Raising it lets the solver find plans that cost far less ΔV.
+* **`MAX_TIME_PATIENT`** (default 8 h). How far out it may go when the tanks
+  leave it no choice.
 * **`PHASE_R_SPAN`** (default 0.35). How far from the target's radius the search
   may roam. A phasing orbit's periapsis is never allowed inside the atmosphere
   plus `PE_SAFETY`.
@@ -117,7 +135,33 @@ So the transfer node is **planted** from the closed form and then **refined**
 numerically. kOS's `POSITIONAT` accounts for planned maneuver nodes on the
 active vessel, so the script can nudge the node and read the closest approach it
 would actually produce. It hill-climbs on prograde, normal, and node time with a
-halving step until the miss is inside `INTERCEPT_DIST` or the step runs out.
+halving step.
+
+### What the search is scored on
+
+Not the miss alone. **`VELOCITYAT` reads through a planned node just as
+`POSITIONAT` does**, so every trial is priced on two numbers: the miss it makes,
+and the relative velocity it arrives with — which is what the arrival burn will
+have to pay to stop.
+
+Scoring on the miss alone is a trap, and it is the specific defect that put a
+flight past its station at 75 m/s. Hitting a point is easy if you may arrive at
+any speed you like, so a hill-climb given a free hand steepens the transfer
+round after round, because a steeper transfer aims better. Each of those rounds
+spends the arrival burn's propellant before the arrival burn is lit. In the
+flight that exposed this, a transfer whose closed-form injection was ~13 m/s
+was refined to 43.9 m/s and arrived at **90.6 m/s** — six times what the budget
+had allowed for stopping.
+
+The refinement therefore works in two regimes, decided by the best plan so far
+rather than by the trial (or a trial that misses by miles wins for being cheap):
+
+* **Not yet intercepting** — take the smaller miss, but never one whose total
+  cost, injection plus arrival, the purse cannot cover.
+* **Already inside `INTERCEPT_DIST`** — stay inside it and get cheaper.
+
+and it stops when the plan both hits *and* can be paid for, rather than on the
+miss alone.
 
 Two details that are easy to get wrong and are handled explicitly:
 
@@ -216,6 +260,72 @@ ship drifting with no way to stop. It is budgeted and reported separately, and
 the approach stops at `MONO_RESERVE` and holds rather than spending the last of
 it.
 
+## 6b. But a rendezvous cannot be half-done
+
+The reserve says *where a burn stops*. It does not say *which burn is allowed to
+be the one that stops there* — and getting that wrong turns a safety property
+into a way of losing the mission and the propellant together.
+
+Consider a flight priced at 386 m/s with 298 m/s aboard. The old script said
+"flying it anyway — every burn stops at the reserve" and set off. The plane
+change, the phasing transfer and the circularisation were all flown in full.
+The 88 m/s shortfall therefore landed, in its entirety, on the **last** burn:
+the arrival. That burn needed 90.6 m/s, got 10, and stopped on the reserve with
+**79.89 m/s still on**. The terminal phase then started anyway, met a residual
+nothing aboard could null, emptied the RCS into it to no effect, and handed back
+a ship coasting away from its station at 75 m/s with the mono gone.
+
+Every burn had obeyed the reserve. The rendezvous was still a total loss, and it
+cost 218 m/s to achieve — strictly worse than never having run the script.
+
+The rule that fixes it is a distinction between phases:
+
+* Everything up to the transfer injection **ends in a circular orbit the ship
+  can live in**. Flying one of those on a short budget wastes propellant and
+  nothing else; the ship can stop, refuel, or deorbit.
+* The transfer injection is the **point of no return**. Everything spent
+  reaching the intercept is spent buying a relative velocity that then has to be
+  paid off. An arrival burn cut short does not deliver a partial rendezvous. It
+  delivers a flyby.
+
+So the script now:
+
+1. **Prices the arrival into the bill.** `ARRIVE_DV_ALLOW` (40 m/s) sits
+   alongside `CORR_DV_ALLOW`. The closed-form transfer ΔV prices a *tangential*
+   arrival into a circular orbit at the target's radius, and the transfer the
+   ship actually flies has been bent to hit the target where it will be. The
+   difference used to be nobody's line item, which is how a rendezvous got a GO
+   and then ran out in the one burn that mattered.
+2. **Checks it again against the real geometry, at phase 4c**, immediately
+   before the injection is committed to. `relVelAt(t_closest_approach)` reads
+   through the planted node, so the arrival cost is measured, not assumed. If
+   `dV_aboard − injection − reserve` will not cover it, **the injection is
+   refused**: the script says by how much and holds the phasing orbit with the
+   reserve intact. This check is unconditional — `ABORT_IF_INFEASIBLE` decides
+   whether the ship sets off at all, never whether it commits.
+3. **Refuses a doomed approach.** After the arrival burn the residual is
+   compared against everything that could still null it — main-engine ΔV above
+   the reserve plus usable mono above `MONO_RESERVE`, with `TERM_V_MARGIN` on
+   top. If it will not cover it, the terminal phase does not start, and the
+   remaining monopropellant is kept for station-keeping rather than spent on a
+   pass that was going to happen anyway. The same test runs inside the approach
+   loop, so a closure that becomes unstoppable mid-approach stops the loop
+   instead of grinding the tanks dry against it.
+
+   The test is the **residual and nothing else**, deliberately. Closing is
+   incremental — a ship that runs out of mono halfway in is closer than it was,
+   and the loop stops at `MONO_RESERVE` and says where it got to. Nulling is
+   not: it either happens or the ship goes past. So a budget that covers the
+   residual but not the whole transit is still worth spending; only a budget
+   that cannot null is a reason not to start.
+
+The closing report names the outcome instead of leaving it to be inferred from
+the last line that happened to print, and when relative velocity is still on it
+says whether the range is **opening or closing** — "range 1.3 km" reads like an
+arrival, and very often it is a departure.
+
+**Refusing to go is a result.** Going and not arriving is worse than either.
+
 ## 7. Payload fuel is not our fuel
 
 The same part-tree walk `ascent.ks` does — flood-fill out from the engines,
@@ -260,6 +370,9 @@ are the ones a real flight will have opinions about:
 | Constant | What it decides | Symptom that it is wrong |
 |---|---|---|
 | `MAX_TOTAL_TIME` | How patient the solver may be | Plans cost far more ΔV than they should |
+| `MAX_TIME_PATIENT` | How far out it may go when nothing affordable fits | It refuses rendezvous a longer wait would fund |
+| `ARRIVE_DV_ALLOW` | Budgeted allowance for stopping at the target | Phase 4c refuses transfers that would in fact have worked, or lets through ones that arrive short |
+| `TERM_V_MARGIN` | Margin demanded before the approach starts | Approach declines to start when it would have made it |
 | `INTERCEPT_DIST` | What the transfer aims for | Arrivals are consistently long or hot |
 | `BRAKE_SAFETY` | Padding on the stopping distance | Approach feels sluggish, or arrives too fast |
 | `V_CLOSE_MAX` | Cap on closing speed | Approach takes forever from long range |
