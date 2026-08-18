@@ -301,12 +301,21 @@ FUNCTION portNodeType {
   RETURN "".
 }
 
-// The distance at which the magnets take over.  kOS spells this suffix without
-// the first 'c' in some versions and with it in others; ask for both.
+// The distance at which the magnets take over.  kOS spelled this suffix without
+// the first 'c' until 0.18 and with it ever since, so both names have to be
+// allowed for - but the ORDER matters, and not for the reason it looks like.
+//
+// The obsolete AQUIRERANGE is still *registered* on modern kOS: HASSUFFIX says
+// yes and then reading it throws "as of kOS 0.18.0, AQUIRERANGE is obsolete".
+// A suffix existing is not the same as a suffix being readable, which is a
+// sharper version of the trap the rest of this file's HASSUFFIX guards exist
+// for.  So ask for the current name first and only reach for the old one when
+// the current one is genuinely absent - which can only be an install older than
+// 0.18, where the old name is the real one and reading it is safe.
 FUNCTION portGrabRange {
   PARAMETER prt.
-  IF prt:HASSUFFIX("AQUIRERANGE")  { RETURN prt:AQUIRERANGE. }
   IF prt:HASSUFFIX("ACQUIRERANGE") { RETURN prt:ACQUIRERANGE. }
+  IF prt:HASSUFFIX("AQUIRERANGE")  { RETURN prt:AQUIRERANGE. }
   RETURN 0.
 }
 

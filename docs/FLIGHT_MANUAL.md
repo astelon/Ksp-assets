@@ -563,6 +563,14 @@ the right-hand side is evaluated anyway — and the whole point of asking
 instead. Every suffix in `dock.ks` that a given kOS version might not have is
 reached that way.
 
+And a sharper version of the same thing, which cost a flight to find: **a suffix
+existing does not mean it can be read.** kOS keeps obsolete suffix names
+registered so it can tell you off for using them, so `HASSUFFIX("AQUIRERANGE")`
+answers *yes* on a modern install and then reading it throws "as of kOS 0.18.0,
+AQUIRERANGE is obsolete and has been replaced with ACQUIRERANGE". When a suffix
+has been renamed, ask for the **current** name first and only fall back to the
+old one where the current one is genuinely absent.
+
 ---
 
 ## Manual flight (no kOS)
