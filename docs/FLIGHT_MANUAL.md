@@ -611,6 +611,25 @@ Writing `rendezvous.ks` walked straight into the same trap from a new direction:
 `TRANSFER`, `VESSEL`, `NODE` and `TARGET` are every one of them words you reach
 for while writing a rendezvous, and all four are taken. Run the checker.
 
+**Check them together, not one at a time.** `scripts/*.ks` is not a convenience
+in that command; it is the only way one of the checks can run at all. A
+program's file-scope functions are **global** in kOS and they outlive the
+program, so when `intercept.ks` hands over from `ascent.ks` to `rendezvous.ks`
+to `dock.ks` inside one session, every function name two of those scripts share
+resolves to whichever one was declared first.
+
+That cost a flight. `rendezvous.ks` called its own `resDensity("LiquidFuel",
+0.005)` and got `ascent.ks`'s `resDensity`, which takes one argument, an hour
+into a mission. The crash was the *lucky* case — the arities differed, so it
+stopped. Eighteen other names collided with matching arities, and those do not
+stop; they quietly run the other script's function. Two of them were
+`clampVal`, where `deorbit_land.ks` takes `(lo, hi, value)` and everyone else
+takes `(value, lo, hi)`.
+
+So each script now prefixes any name it shares with another — `ascResDensity`,
+`rdvResDensity`, `dckResDensity`, as `intercept.ks` has always prefixed
+everything `itc` — and the checker fails if a new one appears.
+
 One thing the checker **cannot** see, and `dock.ks` is full of reasons to care:
 do not assume `AND` and `OR` stop evaluating once the answer is known. A guard
 written as `IF thing:HASSUFFIX("X") AND thing:X > 0` is not a guard at all if

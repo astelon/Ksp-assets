@@ -612,7 +612,7 @@ FUNCTION resAmt {
   RETURN total.
 }
 
-FUNCTION normAng {                   // wrap an angle into (-180, 180]
+FUNCTION dlNormAng {                   // wrap an angle into (-180, 180]
   PARAMETER angIn.
   LOCAL ang IS angIn.
   UNTIL ang <= 180 { SET ang TO ang - 360. }
@@ -620,7 +620,7 @@ FUNCTION normAng {                   // wrap an angle into (-180, 180]
   RETURN ang.
 }
 
-FUNCTION clampVal {
+FUNCTION dlClampVal {
   PARAMETER loV, hiV, valIn.
   RETURN MAX(loV, MIN(hiV, valIn)).
 }
@@ -634,7 +634,7 @@ FUNCTION trackAngleAt {
   PARAMETER tUT.
   LOCAL dt  IS tUT - TIME:SECONDS.
   LOCAL sub IS SHIP:BODY:GEOPOSITIONOF(POSITIONAT(SHIP, tUT)).
-  RETURN normAng(KSC_RWY:LNG + BODY_ROT_RATE * dt - sub:LNG).
+  RETURN dlNormAng(KSC_RWY:LNG + BODY_ROT_RATE * dt - sub:LNG).
 }
 
 FUNCTION trackAngleToKSC { RETURN trackAngleAt(TIME:SECONDS). }
@@ -647,16 +647,16 @@ FUNCTION deorbitTimeAfter {
   PARAMETER tFrom.
   LOCAL span IS SHIP:OBT:PERIOD * SCAN_ORBITS.
   LOCAL tA   IS tFrom.
-  LOCAL fa   IS normAng(trackAngleAt(tA) - DEORBIT_LEAD).
+  LOCAL fa   IS dlNormAng(trackAngleAt(tA) - DEORBIT_LEAD).
   LOCAL tB   IS tFrom.
   UNTIL tB >= tFrom + span {
     SET tB TO MIN(tB + SCAN_STEP, tFrom + span).
-    LOCAL fb IS normAng(trackAngleAt(tB) - DEORBIT_LEAD).
+    LOCAL fb IS dlNormAng(trackAngleAt(tB) - DEORBIT_LEAD).
     IF fa * fb <= 0 AND ABS(fa - fb) < 90 {
       LOCAL lo IS tA.  LOCAL hi IS tB.  LOCAL flo IS fa.
       FROM { LOCAL iter IS 0. } UNTIL iter >= 25 STEP { SET iter TO iter + 1. } DO {
         LOCAL mid IS (lo + hi) / 2.
-        LOCAL fm  IS normAng(trackAngleAt(mid) - DEORBIT_LEAD).
+        LOCAL fm  IS dlNormAng(trackAngleAt(mid) - DEORBIT_LEAD).
         IF flo * fm <= 0 { SET hi TO mid. }
         ELSE { SET lo TO mid. SET flo TO fm. }
       }
@@ -700,7 +700,7 @@ FUNCTION coastArcDeg {
   LOCAL ecc IS (rBurn - rPe) / (rBurn + rPe).
   IF ecc < 0.000001 { RETURN 0. }
   // r = a(1 - e cos E), measured from periapsis: E = 0 at Pe, 180 at Ap.
-  LOCAL eAnom IS ARCCOS(clampVal(-1, 1, (sma - rIf) / (sma * ecc))).
+  LOCAL eAnom IS ARCCOS(dlClampVal(-1, 1, (sma - rIf) / (sma * ecc))).
   LOCAL nu    IS 2 * ARCTAN2(SQRT(1 + ecc) * SIN(eAnom / 2),
                              SQRT(1 - ecc) * COS(eAnom / 2)).
   LOCAL mAnom IS eAnom - ecc * SIN(eAnom) * CONSTANT:RADTODEG.
@@ -760,7 +760,7 @@ FUNCTION rocketIsp {
 }
 
 // How long dV takes at full throttle, from the rocket equation run backwards.
-FUNCTION burnTimeFor {
+FUNCTION dlBurnTimeFor {
   PARAMETER dv.
   LOCAL thr IS SHIP:AVAILABLETHRUST.
   IF dv <= 0 OR thr <= 0 { RETURN 0. }
@@ -781,7 +781,7 @@ FUNCTION burnSteer {
 
 // Force every multimode engine into closed cycle: in vacuum the air-breathing
 // mode reports no thrust, which would poison the node's burn-time estimate.
-FUNCTION goClosedCycle {
+FUNCTION dlGoClosedCycle {
   LOCAL engs IS LIST().
   LIST ENGINES IN engs.
   FOR eng IN engs {
@@ -793,7 +793,7 @@ FUNCTION goClosedCycle {
 }
 
 // Put the multimode engines back on air so that any thrust asked for during the
-// glide is jet thrust.  goClosedCycle() also cleared AUTOSWITCH, so without this
+// glide is jet thrust.  dlGoClosedCycle() also cleared AUTOSWITCH, so without this
 // the RAPIERs would still be burning oxidiser down at 5 km.
 FUNCTION goAirBreathing {
   LOCAL engs IS LIST().
@@ -829,7 +829,7 @@ FUNCTION compassOf {
 
 // Flight path angle: how far the surface velocity vector points above the local
 // horizon, in degrees.  Negative while descending.
-FUNCTION fpaNow {
+FUNCTION dlFpaNow {
   LOCAL svel IS SHIP:VELOCITY:SURFACE.
   IF svel:MAG < 5 { RETURN 0. }
   RETURN 90 - VANG(SHIP:UP:VECTOR, svel).
@@ -845,7 +845,7 @@ FUNCTION dirFor {
   LOCAL upv  IS SHIP:UP:VECTOR.
   LOCAL nrt  IS VXCL(upv, SHIP:NORTH:VECTOR):NORMALIZED.
   LOCAL est  IS eastVec():NORMALIZED.
-  LOCAL pCmd IS clampVal(PITCH_MIN, PITCH_MAX, pitchDeg).
+  LOCAL pCmd IS dlClampVal(PITCH_MIN, PITCH_MAX, pitchDeg).
   LOCAL flat IS nrt * COS(hdgDeg) + est * SIN(hdgDeg).
   LOCAL fore IS flat * COS(pCmd) + upv * SIN(pCmd).
   LOCAL rgt  IS VCRS(upv, fore):NORMALIZED.       // starboard, same handedness as east
@@ -859,7 +859,7 @@ FUNCTION dirFor {
 // however steep the descent gets - this is the stall guard.
 FUNCTION aeroSteer {
   PARAMETER hdgDeg, aoaDeg, bankDeg.
-  RETURN dirFor(hdgDeg, fpaNow() + clampVal(AOA_CMD_MIN, REENTRY_AOA, aoaDeg), bankDeg).
+  RETURN dirFor(hdgDeg, dlFpaNow() + dlClampVal(AOA_CMD_MIN, REENTRY_AOA, aoaDeg), bankDeg).
 }
 
 // Compass heading of the airstream, which is what every atmospheric command is
@@ -919,7 +919,7 @@ FUNCTION yawAuthority {
 // opening to full by MANEUVER_Q), and a fast ship leans rather than banks.
 FUNCTION bankAuthority {
   PARAMETER spd.
-  LOCAL byAir IS BANK_MAX * clampVal(0, 1,
+  LOCAL byAir IS BANK_MAX * dlClampVal(0, 1,
         (SHIP:DYNAMICPRESSURE - STALL_Q) / (MANEUVER_Q - STALL_Q)).
   IF spd >= FAST_SPD { RETURN MIN(byAir, ENTRY_BANK_MAX). }
   RETURN byAir.
@@ -952,7 +952,7 @@ FUNCTION glideSpeedTarget {
   LOCAL qNow IS SHIP:DYNAMICPRESSURE.
   LOCAL spd  IS SHIP:AIRSPEED.
   IF qNow < 0.001 OR spd < 40 { RETURN GLIDE_SPD_MAX. }   // no air to measure: dive
-  RETURN clampVal(GLIDE_SPD_MIN, GLIDE_SPD_MAX, spd * SQRT(GLIDE_Q / qNow)).
+  RETURN dlClampVal(GLIDE_SPD_MIN, GLIDE_SPD_MAX, spd * SQRT(GLIDE_Q / qNow)).
 }
 
 // The single place a guidance law is turned into a steering command.  Every
@@ -968,10 +968,10 @@ FUNCTION setNav {
   LOCAL base    IS flightHdg().
   LOCAL yawLim  IS yawAuthority(spd).
   LOCAL bankLim IS bankAuthority(spd).
-  LOCAL hdgErr  IS clampVal(-yawLim, yawLim, normAng(hdgWant - base)).
+  LOCAL hdgErr  IS dlClampVal(-yawLim, yawLim, dlNormAng(hdgWant - base)).
   SET gHdg  TO base + hdgErr.
-  SET gBank TO clampVal(-bankLim, bankLim, hdgErr * BANK_PER_DEG).
-  SET gAoa  TO clampVal(AOA_CMD_MIN, aoaMax, aoaWant).
+  SET gBank TO dlClampVal(-bankLim, bankLim, hdgErr * BANK_PER_DEG).
+  SET gAoa  TO dlClampVal(AOA_CMD_MIN, aoaMax, aoaWant).
 }
 
 // Stall / departure recovery, and the only manoeuvre that outranks navigation:
@@ -1021,7 +1021,7 @@ FUNCTION stallRecover {
     SET tPrev TO TIME:SECONDS.
     IF noseOff() < RECOVER_HDG_OK {
       LOCAL lim IS RECOVER_HDG_RATE * dt.
-      SET hdgHold TO hdgHold + clampVal(-lim, lim, normAng(flightHdg() - hdgHold)).
+      SET hdgHold TO hdgHold + dlClampVal(-lim, lim, dlNormAng(flightHdg() - hdgHold)).
     }
     SET gHdg  TO hdgHold.
     SET gAoa  TO RECOVER_AOA.
@@ -1071,7 +1071,7 @@ FUNCTION energyHeight {
 FUNCTION ldNominal {
   LOCAL spd IS SHIP:AIRSPEED.
   IF spd <= ENTRY_AOA_LO { RETURN PLAN_LD. }
-  LOCAL frac IS clampVal(0, 1, (spd - ENTRY_AOA_LO) / (ENTRY_AOA_HI - ENTRY_AOA_LO)).
+  LOCAL frac IS dlClampVal(0, 1, (spd - ENTRY_AOA_LO) / (ENTRY_AOA_HI - ENTRY_AOA_LO)).
   RETURN PLAN_LD + frac * (ENTRY_LD - PLAN_LD).
 }
 
@@ -1117,7 +1117,7 @@ FUNCTION ldSample {
     // fact long - the one state in which shutting the energy dumps down would be
     // exactly the wrong answer.
     IF dEh > 50 AND dRng > 0 {
-      LOCAL ldNow IS clampVal(0.3, LD_MEAS_MAX, dRng / dEh).
+      LOCAL ldNow IS dlClampVal(0.3, LD_MEAS_MAX, dRng / dEh).
       // Seed against the model rather than off the first sample.  The estimate
       // is only ever used to *lower* the capability, so the honest opening
       // position is the pessimistic one - a single flattering first sample
@@ -1202,10 +1202,10 @@ FUNCTION groundRange {
 // is the bearing *to* the threshold, so comparing it with the runway heading is
 // the whole calculation.
 FUNCTION alongTrackToRwy {
-  RETURN groundRange(KSC_RWY) * COS(normAng(KSC_RWY:HEADING - RUNWAY_HDG)).
+  RETURN groundRange(KSC_RWY) * COS(dlNormAng(KSC_RWY:HEADING - RUNWAY_HDG)).
 }
 FUNCTION crossTrackToRwy {
-  RETURN groundRange(KSC_RWY) * SIN(normAng(KSC_RWY:HEADING - RUNWAY_HDG)).
+  RETURN groundRange(KSC_RWY) * SIN(dlNormAng(KSC_RWY:HEADING - RUNWAY_HDG)).
 }
 
 // The point `dist` metres from `origin` along compass heading `hdgDeg`, solved
@@ -1223,7 +1223,7 @@ FUNCTION geoOffset {
   PARAMETER origin, hdgDeg, dist.
   LOCAL dl  IS dist / BODY_R * CONSTANT:RADTODEG.     // angular distance, degrees
   LOCAL la1 IS origin:LAT.
-  LOCAL la2 IS ARCSIN(clampVal(-1, 1,
+  LOCAL la2 IS ARCSIN(dlClampVal(-1, 1,
         SIN(la1) * COS(dl) + COS(la1) * SIN(dl) * COS(hdgDeg))).
   LOCAL lo2 IS origin:LNG + ARCTAN2(SIN(hdgDeg) * SIN(dl) * COS(la1),
                                     COS(dl) - SIN(la1) * SIN(la2)).
@@ -1375,7 +1375,7 @@ FUNCTION siteRunHdg {
   LOCAL bestC IS -1.
   FROM { LOCAL idx IS 0. } UNTIL idx >= 12 STEP { SET idx TO idx + 1. } DO {
     LOCAL hdg  IS idx * 30.
-    LOCAL turn IS ABS(normAng(hdg - approachHdg)).
+    LOCAL turn IS ABS(dlNormAng(hdg - approachHdg)).
     IF turn <= SITE_HDG_MAX {
       LOCAL cost IS siteRunSpread(geo, hdg) + turn * SITE_HDG_COST.
       IF bestC < 0 OR cost < bestC { SET bestC TO cost. SET bestH TO hdg. }
@@ -1472,7 +1472,7 @@ FUNCTION finalApproach {
       LOCAL hdgWant IS RUNWAY_HDG.
       IF rng > 400 {
         SET hdgWant TO RUNWAY_HDG +
-              clampVal(-LOC_MAX, LOC_MAX, normAng(KSC_RWY:HEADING - RUNWAY_HDG) * LOC_GAIN).
+              dlClampVal(-LOC_MAX, LOC_MAX, dlNormAng(KSC_RWY:HEADING - RUNWAY_HDG) * LOC_GAIN).
       }
 
       // ... and a flight path, not just a speed.  The sink that holds the slope,
@@ -1480,15 +1480,15 @@ FUNCTION finalApproach {
       // approach descends, and one that does not is on its way past the field.
       LOCAL vHor    IS VXCL(SHIP:UP:VECTOR, SHIP:VELOCITY:SURFACE):MAG.
       LOCAL vsWant  IS -vHor * TAN(GLIDESLOPE)
-                       - clampVal(-APPR_VS_AUTH, APPR_VS_AUTH,
+                       - dlClampVal(-APPR_VS_AUTH, APPR_VS_AUTH,
                                   (agl - tgtAgl) / APPR_VS_TAU).
       SET vsWant TO MIN(vsWant, -1).
 
       setNav(hdgWant, APPR_AOA + (spd - spdTgt) * AOA_PER_MS
-                      + clampVal(-GLIDE_VS_AUTH, GLIDE_VS_AUTH,
+                      + dlClampVal(-GLIDE_VS_AUTH, GLIDE_VS_AUTH,
                                  (vsWant - VERTICALSPEED) * GLIDE_VS_GAIN),
              GLIDE_AOA_MAX).
-      SET gBank TO clampVal(-20, 20, gBank).
+      SET gBank TO dlClampVal(-20, 20, gBank).
       IF ALT:RADAR < 120 { SET gBank TO 0. }               // wings level before the wheels
       IF TIME:SECONDS < gSteady { SET gBank TO 0. }        // ... and after a recovery
 
@@ -1497,7 +1497,7 @@ FUNCTION finalApproach {
       // again, or the ship arrives high, fast and floating down the runway.
       IF USE_JETS_SHORT AND resAmt("LiquidFuel") > JET_MIN_LF
          AND (agl < tgtAgl - 60 OR spd < spdTgt - 20) {
-        SET gThrot TO clampVal(0, 1, THROT_MIN_PWR + (spdTgt - spd) * THROT_PER_MS).
+        SET gThrot TO dlClampVal(0, 1, THROT_MIN_PWR + (spdTgt - spd) * THROT_PER_MS).
         // A ship above its slope never needs thrust, however slow it is.  The
         // answer to slow and high is the nose, and the sink command above is
         // already giving it - thrust here just flies the ship down the runway.
@@ -1600,14 +1600,14 @@ FUNCTION emergencyLanding {
         SET steerTo TO gSite:HEADING.
       }
       setNav(steerTo, APPR_AOA + (spd - APPR_SPEED) * AOA_PER_MS
-                      + clampVal(-GLIDE_VS_AUTH, GLIDE_VS_AUTH,
+                      + dlClampVal(-GLIDE_VS_AUTH, GLIDE_VS_AUTH,
                                  (vsWant - VERTICALSPEED) * GLIDE_VS_GAIN),
              GLIDE_AOA_MAX).
-      SET gBank TO clampVal(-15, 15, gBank).
+      SET gBank TO dlClampVal(-15, 15, gBank).
       IF committed OR TIME:SECONDS < gSteady { SET gBank TO 0. }
       SET landHdg TO gHdg.
       IF USE_JETS_SHORT AND resAmt("LiquidFuel") > JET_MIN_LF AND spd < APPR_SPEED {
-        SET gThrot TO clampVal(0, 1, THROT_MIN_PWR + (APPR_SPEED - spd) * THROT_PER_MS).
+        SET gThrot TO dlClampVal(0, 1, THROT_MIN_PWR + (APPR_SPEED - spd) * THROT_PER_MS).
       } ELSE {
         SET gThrot TO 0.
       }
@@ -1651,7 +1651,7 @@ LOCK THROTTLE TO 0.
 // bearing to it, so the two must match exactly - but only check it from far
 // enough away that the bearing is well conditioned.
 IF groundRange(KSC_RWY) > 20000 {
-  SET frameErr TO ABS(normAng(compassOf(KSC_RWY:POSITION) - KSC_RWY:HEADING)).
+  SET frameErr TO ABS(dlNormAng(compassOf(KSC_RWY:POSITION) - KSC_RWY:HEADING)).
   IF frameErr > 2 {
     PRINT "!! FRAME CHECK FAILED: compassOf disagrees with KSC bearing by " +
           ROUND(frameErr, 1) + " deg.".
@@ -1662,7 +1662,7 @@ IF groundRange(KSC_RWY) > 20000 {
 // --- 1a. Get in position ----------------------------------------------------
 // Attitude first, node second, warp third: on rails the ship cannot rotate, so
 // it has to leave for the burn point already pointing the right way.
-goClosedCycle().
+dlGoClosedCycle().
 PRINT "Orienting retrograde before planning the burn.".
 LOCK STEERING TO SHIP:RETROGRADE.
 SET tAlign TO TIME:SECONDS + 120.
@@ -1695,7 +1695,7 @@ IF DEORBIT_LEAD <= 0 {
 
 // Size a rough burn first, so the search only offers deorbit points we can
 // still reach with the warp lead and half the burn in hand.
-SET tbGuess  TO burnTimeFor(deorbitDvAt(TIME:SECONDS + 60)).
+SET tbGuess  TO dlBurnTimeFor(deorbitDvAt(TIME:SECONDS + 60)).
 SET tSoonest TO TIME:SECONDS + WARP_LEAD + tbGuess / 2 + 10.
 SET tBurn    TO deorbitTimeAfter(tSoonest).
 
@@ -1706,7 +1706,7 @@ IF NOT usingNode {
   WAIT UNTIL ABS(trackAngleToKSC() - DEORBIT_LEAD) < 2.
 } ELSE {
   SET dvNeed  TO deorbitDvAt(tBurn).
-  SET burnDur TO burnTimeFor(dvNeed).
+  SET burnDur TO dlBurnTimeFor(dvNeed).
   IF burnDur <= 0 {
     PRINT "WARNING: no thrust reported - assuming a 30 s burn for the timing.".
     SET burnDur TO 30.
@@ -1902,7 +1902,7 @@ UNTIL SHIP:AIRSPEED < ENTRY_END_SPD OR SHIP:ALTITUDE < ENTRY_FLOOR {
     // airstream it ended up, which is a measure of the tumble and not of the
     // envelope.  Cap below the failed command, and never above where the cap
     // already was.
-    SET gAoaCap TO clampVal(ENTRY_AOA_MIN, gAoaCap - ENTRY_AOA_STEP,
+    SET gAoaCap TO dlClampVal(ENTRY_AOA_MIN, gAoaCap - ENTRY_AOA_STEP,
                             gAoa - ENTRY_AOA_STEP * 2).
     stallRecover(GLIDE_FLOOR).
     SET gDepCnt TO 0.
@@ -2191,10 +2191,10 @@ UNTIL (groundRange(gTarget) < FAF_CAPTURE
     LOCAL ldWant IS PLAN_LD.
     IF ehErr > 0 {
       SET ldWant TO PLAN_LD +
-            clampVal(0, 1, ehErr / HIGH_MARGIN) * (LD_DUMP - PLAN_LD).
+            dlClampVal(0, 1, ehErr / HIGH_MARGIN) * (LD_DUMP - PLAN_LD).
     } ELSE {
       SET ldWant TO PLAN_LD +
-            clampVal(0, 1, -ehErr / LOW_MARGIN) * (LD_STRETCH - PLAN_LD).
+            dlClampVal(0, 1, -ehErr / LOW_MARGIN) * (LD_STRETCH - PLAN_LD).
     }
     LOCAL vHor   IS VXCL(SHIP:UP:VECTOR, SHIP:VELOCITY:SURFACE):MAG.
     LOCAL vsWant IS -vHor / MAX(0.5, ldWant).
@@ -2242,7 +2242,7 @@ UNTIL (groundRange(gTarget) < FAF_CAPTURE
     }
 
     LOCAL aoaCmd IS GLIDE_AOA + (spd - spdTgt) * AOA_PER_MS
-                    + clampVal(-GLIDE_VS_AUTH, GLIDE_VS_AUTH,
+                    + dlClampVal(-GLIDE_VS_AUTH, GLIDE_VS_AUTH,
                                (vsWant - VERTICALSPEED) * GLIDE_VS_GAIN).
 
     // Ballooning while still fast throws the speed away at an altitude with
@@ -2348,7 +2348,7 @@ UNTIL (groundRange(gTarget) < FAF_CAPTURE
       // bought at all.  The floor is spool-up for a ship that is genuinely
       // short; there is no floor for a ship that is merely slow and high,
       // because the answer to slow and high is to point the nose down.
-      SET gThrot TO clampVal(0, 1, (spdTgt - spd) * THROT_PER_MS).
+      SET gThrot TO dlClampVal(0, 1, (spdTgt - spd) * THROT_PER_MS).
       IF ehNow < armEh OR SHIP:DYNAMICPRESSURE < STALL_Q OR lowGnd {
         SET gThrot TO MAX(gThrot, THROT_MIN_PWR).
       } ELSE IF ehErr > 0 {

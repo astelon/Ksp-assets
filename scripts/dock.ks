@@ -216,10 +216,10 @@ SET STEER_TOUCHED TO FALSE.
 //  writing a docking script.  Run `tools/check_kos.py` after editing; it checks
 //  before the game does.
 
-// Clamp `valIn` into [loV, hiV].  Same argument order as rendezvous.ks and the
-// opposite of the clampVal in deorbit_land.ks - keep them straight when copying
+// Clamp `valIn` into [loV, hiV].  Same argument order as rdvClampVal and the
+// opposite of dlClampVal in deorbit_land.ks - keep them straight when copying
 // a line between files.
-FUNCTION clampVal {
+FUNCTION dckClampVal {
   PARAMETER valIn, loV, hiV.
   RETURN MAX(loV, MIN(hiV, valIn)).
 }
@@ -390,7 +390,7 @@ FUNCTION spanAbout {
 //  the main tanks - but the mono has to be counted honestly, because the whole
 //  approach is flown out of it and there is no second way to stop.
 // ---------------------------------------------------------------------------
-FUNCTION resAmtShip {
+FUNCTION dckResAmtShip {
   PARAMETER rname.
   LOCAL total IS 0.
   FOR res IN SHIP:RESOURCES {
@@ -399,7 +399,7 @@ FUNCTION resAmtShip {
   RETURN total.
 }
 
-FUNCTION resDensity {               // tonnes per unit
+FUNCTION dckResDensity {               // tonnes per unit
   PARAMETER rname, fallback.
   FOR res IN SHIP:RESOURCES {
     IF res:NAME = rname AND res:DENSITY > 0 { RETURN res:DENSITY. }
@@ -407,7 +407,7 @@ FUNCTION resDensity {               // tonnes per unit
   RETURN fallback.
 }
 
-SET MONO_DENS TO resDensity("MonoPropellant", 0.004).
+SET MONO_DENS TO dckResDensity("MonoPropellant", 0.004).
 
 SET RCS_BLOCKS TO 0.
 FOR prt IN SHIP:PARTS {
@@ -416,9 +416,9 @@ FOR prt IN SHIP:PARTS {
   }
 }
 
-FUNCTION monoDv {                   // what is in the mono tanks, as dV (m/s)
+FUNCTION dckMonoDv {                   // what is in the mono tanks, as dV (m/s)
   LOCAL m0 IS SHIP:MASS.
-  LOCAL m1 IS m0 - resAmtShip("MonoPropellant") * MONO_DENS.
+  LOCAL m1 IS m0 - dckResAmtShip("MonoPropellant") * MONO_DENS.
   IF m0 <= 0 OR m1 <= 0 OR m1 >= m0 { RETURN 0. }
   RETURN RCS_ISP_FALLBACK * G0 * LN(m0 / m1).
 }
@@ -429,13 +429,13 @@ FUNCTION monoDv {                   // what is in the mono tanks, as dV (m/s)
 // really does and believes that instead.
 SET rcsAccEst TO 0.15.
 
-FUNCTION rcsAccelNominal {
+FUNCTION dckRcsAccelNominal {
   IF SHIP:MASS <= 0 { RETURN RCS_ACC_MIN. }
   RETURN MAX(RCS_ACC_MIN,
              RCS_BLOCKS * RCS_THRUST_BLOCK * RCS_AXIS_FRAC / SHIP:MASS).
 }
 
-FUNCTION approachAccel {            // the figure every braking schedule uses
+FUNCTION dckApproachAccel {            // the figure every braking schedule uses
   RETURN MAX(RCS_ACC_MIN, rcsAccEst).
 }
 
@@ -445,24 +445,24 @@ FUNCTION approachAccel {            // the figure every braking schedule uses
 FUNCTION legCost {
   PARAMETER lenM, vCap.
   IF lenM <= 0.5 { RETURN 0. }
-  LOCAL vLeg IS MIN(vCap, SQRT(2 * approachAccel() * lenM / BRAKE_SAFETY)).
+  LOCAL vLeg IS MIN(vCap, SQRT(2 * dckApproachAccel() * lenM / BRAKE_SAFETY)).
   RETURN 2 * vLeg.
 }
 
 SET logStarted TO FALSE.
 
-FUNCTION resourceReport {
+FUNCTION dckResourceReport {
   PARAMETER label.
-  LOCAL monoAmt IS resAmtShip("MonoPropellant").
-  LOCAL ecAmt   IS resAmtShip("ElectricCharge").
+  LOCAL monoAmt IS dckResAmtShip("MonoPropellant").
+  LOCAL ecAmt   IS dckResAmtShip("ElectricCharge").
   PRINT "------------------------------------------------------".
   PRINT "RESOURCES :: " + label.
   PRINT "  Mass  : " + ROUND(SHIP:MASS, 2) + " t".
-  PRINT "  Mono  : " + ROUND(monoAmt, 1) + " u   ->  " + ROUND(monoDv(), 1) +
+  PRINT "  Mono  : " + ROUND(monoAmt, 1) + " u   ->  " + ROUND(dckMonoDv(), 1) +
         " m/s on RCS".
   PRINT "  EC    : " + ROUND(ecAmt, 1) + " u".
   PRINT "  RCS   : " + RCS_BLOCKS + " block(s), " +
-        ROUND(approachAccel(), 3) + " m/s^2 of translation".
+        ROUND(dckApproachAccel(), 3) + " m/s^2 of translation".
   PRINT "------------------------------------------------------".
 
   IF LOG_TO_FILE {
@@ -471,12 +471,12 @@ FUNCTION resourceReport {
       SET logStarted TO TRUE.
     }
     LOG ROUND(TIME:SECONDS, 1) + "," + label + "," + ROUND(SHIP:MASS, 3) + "," +
-        ROUND(monoAmt, 2) + "," + ROUND(ecAmt, 2) + "," + ROUND(monoDv(), 1) +
-        "," + ROUND(approachAccel(), 4) TO LOG_PATH.
+        ROUND(monoAmt, 2) + "," + ROUND(ecAmt, 2) + "," + ROUND(dckMonoDv(), 1) +
+        "," + ROUND(dckApproachAccel(), 4) TO LOG_PATH.
   }
 }
 
-FUNCTION handBack {
+FUNCTION dckHandBack {
   SET SHIP:CONTROL:NEUTRALIZE TO TRUE.
   LOCK THROTTLE TO 0.
   UNLOCK THROTTLE.
@@ -612,7 +612,7 @@ FUNCTION axisCmd {
   PARAMETER vErr, axisVec.
   LOCAL comp IS VDOT(vErr, axisVec).
   IF ABS(comp) < TRANS_DEAD { RETURN 0. }
-  RETURN clampVal(comp * TRANS_GAIN, -1, 1).
+  RETURN dckClampVal(comp * TRANS_GAIN, -1, 1).
 }
 
 FUNCTION translateTo {
@@ -881,14 +881,14 @@ IF okToGo {
 
 // --- 0e. Can we translate at all? -------------------------------------------
 IF okToGo {
-  SET rcsAccEst TO rcsAccelNominal().
+  SET rcsAccEst TO dckRcsAccelNominal().
   IF RCS_BLOCKS = 0 {
     PRINT "!! No RCS thrusters aboard. The approach is flown entirely on RCS;".
     PRINT "   there is no way to fly it without them.".
     SET okToGo TO FALSE.
-  } ELSE IF resAmtShip("MonoPropellant") <= MONO_RESERVE {
+  } ELSE IF dckResAmtShip("MonoPropellant") <= MONO_RESERVE {
     PRINT "!! Monopropellant is down to " +
-          ROUND(resAmtShip("MonoPropellant"), 1) + " u, at or below the " +
+          ROUND(dckResAmtShip("MonoPropellant"), 1) + " u, at or below the " +
           MONO_RESERVE + " u reserve.".
     SET okToGo TO FALSE.
   }
@@ -963,11 +963,11 @@ IF okToGo {
   LOCAL toHat IS V(0, 0, 0).
   IF sepVec:MAG > 0.001 { SET toHat TO (-sepVec):NORMALIZED. }
   LOCAL closing IS VDOT(vRel, toHat).
-  IF closing > 0.3 AND closing * closing > 2 * approachAccel() * room {
+  IF closing > 0.3 AND closing * closing > 2 * dckApproachAccel() * room {
     PRINT "!! Closing on " + tgtVes:NAME + " at " + ROUND(closing, 1) +
           " m/s with " + ROUND(room) + " m before the keep-out sphere.".
     PRINT "   This ship's RCS can stop " +
-          ROUND(SQRT(2 * approachAccel() * room), 1) +
+          ROUND(SQRT(2 * dckApproachAccel() * room), 1) +
           " m/s from there and no more - starting an approach now ends".
     PRINT "   inside " + tgtVes:NAME + " whatever the thrusters do.".
     PRINT "   Null the relative velocity first and re-run.".
@@ -992,7 +992,7 @@ IF okToGo {
   }
   SET monoBill TO legCost(legOut, V_CORRIDOR) + legCost(legFwd, V_CORRIDOR) +
                   legCost(STANDOFF, V_FINAL) + vRel:MAG + MONO_TRIM.
-  SET monoHave TO monoDv().
+  SET monoHave TO dckMonoDv().
 
   PRINT "------------------------------------------------------".
   PRINT "TARGET :: " + tgtPort:TITLE + " on " + tgtVes:NAME.
@@ -1006,7 +1006,7 @@ IF okToGo {
         ROUND(tgtSpan, 1) + " m from theirs".
   PRINT "  Keep-out  : " + ROUND(KEEP_R) + " m,  standoff " + ROUND(STANDOFF) +
         " m,  capture at " + ROUND(GRAB_GAP, 2) + " m".
-  resourceReport("before docking").
+  dckResourceReport("before docking").
 
   PRINT "======================================================".
   PRINT "MONO BUDGET".
@@ -1161,7 +1161,7 @@ IF okToGo {
         LOCAL errMag IS errVec:MAG.
         IF errMag > 0.05 {
           LOCAL vCap IS MIN(V_CORRIDOR,
-                            SQRT(2 * approachAccel() * errMag / BRAKE_SAFETY)).
+                            SQRT(2 * dckApproachAccel() * errMag / BRAKE_SAFETY)).
           SET vWant TO errVec:NORMALIZED * MIN(vCap, KP_POS * errMag).
         }
 
@@ -1187,7 +1187,7 @@ IF okToGo {
         LOCAL vAx IS 0.
         IF alignErr < ALIGN_HOLD AND latGap < latTol AND axGap > GRAB_GAP {
           SET vAx TO MIN(V_FINAL,
-                         SQRT(2 * approachAccel() * MAX(0, axGap - GRAB_GAP) /
+                         SQRT(2 * dckApproachAccel() * MAX(0, axGap - GRAB_GAP) /
                               BRAKE_SAFETY)).
           IF axGap < V_CREEP_ZONE { SET vAx TO MIN(vAx, V_CAPTURE). }
           SET vAx TO MAX(vAx, V_CREEP).
@@ -1243,7 +1243,7 @@ IF okToGo {
       IF inCorridor() {
         SET emergency TO FALSE.
       } ELSE {
-        LOCAL room IS 2 * approachAccel() * MAX(0, sepVec:MAG - KEEP_R).
+        LOCAL room IS 2 * dckApproachAccel() * MAX(0, sepVec:MAG - KEEP_R).
         LOCAL toHat IS V(0, 0, 0).
         IF sepVec:MAG > 0.001 { SET toHat TO (-sepVec):NORMALIZED. }
         LOCAL vTow IS VDOT(vRel, toHat).
@@ -1268,11 +1268,11 @@ IF okToGo {
         PRINT "  [" + phaseNow + "] ax " + ROUND(axGap, 1) + " m  lat " +
               ROUND(latGap, 2) + " m  ang " + ROUND(alignErr, 1) + " deg  v " +
               ROUND(vRel:MAG, 2) + " m/s  mono " +
-              ROUND(resAmtShip("MonoPropellant")) + " u".
+              ROUND(dckResAmtShip("MonoPropellant")) + " u".
       }
 
       // --- reasons to stop ----------------------------------------------------
-      IF resAmtShip("MonoPropellant") < MONO_RESERVE {
+      IF dckResAmtShip("MonoPropellant") < MONO_RESERVE {
         SET running TO FALSE.
         SET whyStop TO "mono".
       } ELSE IF TIME:SECONDS > tEnd {
@@ -1294,9 +1294,9 @@ IF okToGo {
   PRINT "======================================================".
   IF whyStop = "docked" {
     PRINT "DOCKED to " + TGT_VES_NAME + " at " + TGT_PORT_NAME + ".".
-    PRINT "  Approach flown on " + ROUND(approachAccel(), 3) +
+    PRINT "  Approach flown on " + ROUND(dckApproachAccel(), 3) +
           " m/s^2 of measured RCS authority.".
-    resourceReport("docked").
+    dckResourceReport("docked").
     PRINT "  Crew transfer, fuel transfer and cargo are yours from here.".
     PRINT "  Before you leave: undock, back off past " + ROUND(KEEP_R) +
           " m, then RUN deorbit_land.".
@@ -1322,11 +1322,11 @@ IF okToGo {
     }
     PRINT "  Axial " + ROUND(axGap, 1) + " m, lateral " + ROUND(latGap, 2) +
           " m, axes " + ROUND(alignErr, 1) + " deg apart.".
-    resourceReport("docking incomplete").
+    dckResourceReport("docking incomplete").
   }
   PRINT "======================================================".
 
-  handBack().
+  dckHandBack().
   IF whyStop = "docked" { RCS OFF. } ELSE { RCS ON. }
 }
 
@@ -1335,6 +1335,6 @@ IF okToGo {
 // raised and the throttle locked after the program ends is how a pilot finds
 // the stick dead.
 IF NOT okToGo {
-  handBack().
+  dckHandBack().
   PRINT "Not docking - the ship has not been moved.".
 }

@@ -485,7 +485,7 @@ SET CONFIG:IPU TO 800.
 //  that can separate.  Whatever we reach is the spaceplane; everything else is
 //  payload.
 // ---------------------------------------------------------------------------
-FUNCTION isSeparator {
+FUNCTION ascIsSeparator {
   PARAMETER prt.
   FOR mname IN prt:MODULES {
     LOCAL low IS mname:TOLOWER.
@@ -501,7 +501,7 @@ FUNCTION isSeparator {
 // lexicon of part UIDs that share a fuel network with the engines.  The
 // separators themselves are included (they hold no propellant) but never
 // traversed through, so the payload beyond them stays out.
-FUNCTION mapFeedNetwork {
+FUNCTION ascMapFeedNetwork {
   LOCAL seen  IS LEXICON().
   LOCAL pending IS LIST().
   LOCAL engs  IS LIST().
@@ -513,7 +513,7 @@ FUNCTION mapFeedNetwork {
   UNTIL idx >= pending:LENGTH {
     LOCAL prt IS pending[idx].
     SET idx TO idx + 1.
-    IF NOT isSeparator(prt) {
+    IF NOT ascIsSeparator(prt) {
       LOCAL nbrs IS LIST().
       IF prt:HASPARENT { nbrs:ADD(prt:PARENT). }
       FOR kid IN prt:CHILDREN { nbrs:ADD(kid). }
@@ -525,7 +525,7 @@ FUNCTION mapFeedNetwork {
   RETURN seen.
 }
 
-SET CORE_UIDS   TO mapFeedNetwork().
+SET CORE_UIDS   TO ascMapFeedNetwork().
 SET CORE_TANKS  TO LIST().          // our tanks - the only ones counted as dV
 SET PAY_TANKS   TO LIST().          // payload tanks - counted, then locked out
 SET SEPARATORS  TO LIST().
@@ -538,7 +538,7 @@ FOR prt IN SHIP:PARTS {
   }
   IF CORE_UIDS:HASKEY(prt:UID) {
     IF holds { CORE_TANKS:ADD(prt). }
-    IF isSeparator(prt) { SEPARATORS:ADD(prt). }
+    IF ascIsSeparator(prt) { SEPARATORS:ADD(prt). }
   } ELSE {
     SET PAY_PARTS TO PAY_PARTS + 1.
     IF holds { PAY_TANKS:ADD(prt). }
@@ -546,7 +546,7 @@ FOR prt IN SHIP:PARTS {
 }
 
 // Resource amount inside the engines' own feed network only.
-FUNCTION coreResAmt {
+FUNCTION ascCoreResAmt {
   PARAMETER rname.
   LOCAL total IS 0.
   FOR prt IN CORE_TANKS {
@@ -557,7 +557,7 @@ FUNCTION coreResAmt {
   RETURN total.
 }
 
-FUNCTION listResAmt {               // same, over an arbitrary part list
+FUNCTION ascListResAmt {               // same, over an arbitrary part list
   PARAMETER prts, rname.
   LOCAL total IS 0.
   FOR prt IN prts {
@@ -568,7 +568,7 @@ FUNCTION listResAmt {               // same, over an arbitrary part list
   RETURN total.
 }
 
-FUNCTION resAmtShip {               // whole-ship total (reporting only)
+FUNCTION ascResAmtShip {               // whole-ship total (reporting only)
   PARAMETER rname.
   LOCAL total IS 0.
   FOR res IN SHIP:RESOURCES {
@@ -577,7 +577,7 @@ FUNCTION resAmtShip {               // whole-ship total (reporting only)
   RETURN total.
 }
 
-FUNCTION resDensity {               // tonnes per unit (0.005 for LF and Ox)
+FUNCTION ascResDensity {               // tonnes per unit (0.005 for LF and Ox)
   PARAMETER rname.
   FOR res IN SHIP:RESOURCES {
     IF res:NAME = rname AND res:DENSITY > 0 { RETURN res:DENSITY. }
@@ -585,12 +585,12 @@ FUNCTION resDensity {               // tonnes per unit (0.005 for LF and Ox)
   RETURN 0.005.
 }
 
-SET LF_DENS TO resDensity("LiquidFuel").
-SET OX_DENS TO resDensity("Oxidizer").
+SET LF_DENS TO ascResDensity("LiquidFuel").
+SET OX_DENS TO ascResDensity("Oxidizer").
 
 // Switch crossfeed off on every separator, so the stack physically cannot pull
 // propellant across the payload joint even if the budget maths were wrong.
-FUNCTION blockCrossfeed {
+FUNCTION ascBlockCrossfeed {
   LOCAL blocked IS 0.
   FOR prt IN SEPARATORS {
     FOR mname IN prt:MODULES {
@@ -609,7 +609,7 @@ FUNCTION blockCrossfeed {
 // crossfeed toggle, because a locked tank stays locked after deployment - the
 // payload's own engines will not see its fuel until flow is re-enabled.
 // TOGGLEABLE guards resources that are not allowed to be switched off at all.
-FUNCTION lockPayloadTanks {
+FUNCTION ascLockPayloadTanks {
   LOCAL locked IS 0.
   FOR prt IN PAY_TANKS {
     FOR res IN prt:RESOURCES {
@@ -630,7 +630,7 @@ FUNCTION lockPayloadTanks {
 // wildly overstate the budget, so until the switch we quote the fallback.
 SET RKT_ISP TO ROCKET_ISP_FALLBACK.
 
-FUNCTION measureRocketIsp {
+FUNCTION ascMeasureRocketIsp {
   LOCAL engs IS LIST().
   LIST ENGINES IN engs.
   LOCAL wsum IS 0.
@@ -669,9 +669,9 @@ FUNCTION measureCurrentIsp {
 
 // Propellant mass (t) the closed-cycle engines can actually burn: our LF and Ox
 // only, and only in 9:11 pairs, so a lopsided tank state is not counted as dV.
-FUNCTION rocketPropMass {
-  LOCAL lfAmt IS coreResAmt("LiquidFuel").
-  LOCAL oxAmt IS coreResAmt("Oxidizer").
+FUNCTION ascRocketPropMass {
+  LOCAL lfAmt IS ascCoreResAmt("LiquidFuel").
+  LOCAL oxAmt IS ascCoreResAmt("Oxidizer").
   LOCAL lfUse IS MIN(lfAmt, oxAmt * LFO_LF_RATIO / LFO_OX_RATIO).
   LOCAL oxUse IS lfUse * LFO_OX_RATIO / LFO_LF_RATIO.
   RETURN lfUse * LF_DENS + oxUse * OX_DENS.
@@ -679,9 +679,9 @@ FUNCTION rocketPropMass {
 
 // Remaining closed-cycle dV (m/s): the rocket equation on the live ship.  The
 // payload's mass counts against us; the payload's fuel does not count for us.
-FUNCTION rocketDv {
+FUNCTION ascRocketDv {
   LOCAL m0 IS SHIP:MASS.
-  LOCAL m1 IS m0 - rocketPropMass().
+  LOCAL m1 IS m0 - ascRocketPropMass().
   IF m0 <= 0 OR m1 <= 0 OR m1 >= m0 { RETURN 0. }
   RETURN RKT_ISP * G0 * LN(m0 / m1).
 }
@@ -694,7 +694,7 @@ FUNCTION twrNow {
   RETURN SHIP:AVAILABLETHRUST / wgt.
 }
 
-FUNCTION burnTimeFor {              // seconds to spend dvNeed at full throttle
+FUNCTION ascBurnTimeFor {              // seconds to spend dvNeed at full throttle
   PARAMETER dvNeed.
   LOCAL thr IS SHIP:AVAILABLETHRUST.
   IF thr <= 0 OR dvNeed <= 0 { RETURN 0. }
@@ -702,7 +702,7 @@ FUNCTION burnTimeFor {              // seconds to spend dvNeed at full throttle
   RETURN SHIP:MASS * vEx * (1 - CONSTANT:E ^ (-dvNeed / vEx)) / thr.
 }
 
-FUNCTION clampVal {
+FUNCTION ascClampVal {
   PARAMETER val, lo, hi.
   RETURN MAX(lo, MIN(hi, val)).
 }
@@ -724,14 +724,14 @@ FUNCTION atmScaleHeight {
   LOCAL pHere IS atmPressureAt(SHIP:ALTITUDE).
   LOCAL pUp   IS atmPressureAt(SHIP:ALTITUDE + 1000).
   IF pHere <= 0 OR pUp <= 0 OR pUp >= pHere { RETURN 5000. }
-  RETURN clampVal(1000 / LN(pHere / pUp), 1500, 20000).
+  RETURN ascClampVal(1000 / LN(pHere / pUp), 1500, 20000).
 }
 
 // Closed-cycle thrust *here*: the vacuum figure de-rated by ambient pressure,
 // interpolated between the two readings taken on the runway.
 FUNCTION ccThrustHere {
   RETURN ccThrustVac + (ccThrustAsl - ccThrustVac) *
-         clampVal(atmPressureAt(SHIP:ALTITUDE), 0, 1).
+         ascClampVal(atmPressureAt(SHIP:ALTITUDE), 0, 1).
 }
 
 // What a tonne of liquid fuel costs the rocket phase.  While an LF-only reserve
@@ -739,8 +739,8 @@ FUNCTION ccThrustHere {
 // free in dV terms; once that is gone every tonne the jets take also strands
 // 11/9 t of oxidiser, and the true price is 20/9 t of rocket propellant.
 FUNCTION lfPriceFactor {
-  IF coreResAmt("LiquidFuel") >
-     coreResAmt("Oxidizer") * LFO_LF_RATIO / LFO_OX_RATIO { RETURN 1. }
+  IF ascCoreResAmt("LiquidFuel") >
+     ascCoreResAmt("Oxidizer") * LFO_LF_RATIO / LFO_OX_RATIO { RETURN 1. }
   RETURN (LFO_LF_RATIO + LFO_OX_RATIO) / LFO_LF_RATIO.
 }
 
@@ -749,7 +749,7 @@ FUNCTION lfPriceFactor {
 // slowing this airframe down at this Mach and this Q is in the number.
 FUNCTION dragNow {
   PARAMETER accMeasured.
-  LOCAL sinF IS clampVal(SHIP:VERTICALSPEED / MAX(30, SHIP:VELOCITY:SURFACE:MAG), -1, 1).
+  LOCAL sinF IS ascClampVal(SHIP:VERTICALSPEED / MAX(30, SHIP:VELOCITY:SURFACE:MAG), -1, 1).
   RETURN MAX(0, SHIP:AVAILABLETHRUST - SHIP:MASS * (accMeasured + localG() * sinF)).
 }
 
@@ -846,7 +846,7 @@ FUNCTION heavyEquivalentAt {
   RETURN MIN(dvLight, vEx * LN(mHeavy / (mHeavy - prop))).
 }
 
-FUNCTION heavyEquivalentOf {
+FUNCTION ascHeavyEquivalentOf {
   PARAMETER dvLight.
   RETURN heavyEquivalentAt(dvLight, SHIP:MASS).
 }
@@ -854,7 +854,7 @@ FUNCTION heavyEquivalentOf {
 // What must still be in the tanks *after* we are circular at apAlt.
 FUNCTION reserveDvFor {
   PARAMETER apAlt.
-  RETURN heavyEquivalentOf(deorbitDvFrom(apAlt) + DV_MARGIN).
+  RETURN ascHeavyEquivalentOf(deorbitDvFrom(apAlt) + DV_MARGIN).
 }
 
 // Impulsive estimate of the dV still needed to raise apoapsis to apAlt from
@@ -1081,9 +1081,9 @@ FUNCTION dvAtHandover {             // ... adding a balanced LF/Ox load
 FUNCTION dvHandoverWithPayloadFuel {
   IF PAY_TANKS:LENGTH = 0 { RETURN 0. }
   LOCAL mH IS handoverMass(0, 0, 0).
-  LOCAL lfLeft IS lfMass0 + listResAmt(PAY_TANKS, "LiquidFuel") * LF_DENS -
+  LOCAL lfLeft IS lfMass0 + ascListResAmt(PAY_TANKS, "LiquidFuel") * LF_DENS -
                   jetBurnWith(0, 0, 0).
-  LOCAL oxLeft IS oxMass0 + listResAmt(PAY_TANKS, "Oxidizer") * OX_DENS.
+  LOCAL oxLeft IS oxMass0 + ascListResAmt(PAY_TANKS, "Oxidizer") * OX_DENS.
   LOCAL lfUse IS MIN(lfLeft, oxLeft * LFO_LF_RATIO / LFO_OX_RATIO).
   IF lfUse <= 0 { RETURN 0. }
   LOCAL prop IS lfUse * (LFO_LF_RATIO + LFO_OX_RATIO) / LFO_LF_RATIO.
@@ -1175,11 +1175,11 @@ FUNCTION speedNow {
 
 FUNCTION vsToFpa {                  // a vertical speed, as a flight-path angle
   PARAMETER vsWanted.
-  RETURN ARCSIN(clampVal(vsWanted / speedNow(), -0.95, 0.95)).
+  RETURN ARCSIN(ascClampVal(vsWanted / speedNow(), -0.95, 0.95)).
 }
 
-FUNCTION fpaNow {
-  RETURN ARCSIN(clampVal(SHIP:VERTICALSPEED / speedNow(), -0.95, 0.95)).
+FUNCTION ascFpaNow {
+  RETURN ARCSIN(ascClampVal(SHIP:VERTICALSPEED / speedNow(), -0.95, 0.95)).
 }
 
 // How much angle of attack the flow may be charged for right now.  In the jet
@@ -1195,20 +1195,20 @@ FUNCTION aoaLimitNow {
 
 FUNCTION steerFpa {
   PARAMETER fpaWanted, pitchLo, pitchHi, dtStep.
-  LOCAL err IS fpaWanted - fpaNow().
+  LOCAL err IS fpaWanted - ascFpaNow().
   LOCAL raw IS fpaWanted + aoaTrim.
   IF (raw > pitchLo AND raw < pitchHi) OR
      (raw <= pitchLo AND err > 0) OR
      (raw >= pitchHi AND err < 0) {
-    SET aoaTrim TO clampVal(aoaTrim + AOA_KI * err * dtStep, -AOA_TRIM_MAX, AOA_TRIM_MAX).
+    SET aoaTrim TO ascClampVal(aoaTrim + AOA_KI * err * dtStep, -AOA_TRIM_MAX, AOA_TRIM_MAX).
   }
   // Limit the angle the airframe actually presents to the flow, not the trim.
   // They are not the same number: while the trim is winding up the flight path
   // lags the command, and the real angle of attack is the trim *plus* that lag.
   // The reference flight sat on a 14 deg trim clamp and flew at 16.4 deg.
-  LOCAL cmd IS clampVal(fpaWanted + aoaTrim,
-                        fpaNow() - aoaCap, fpaNow() + aoaCap).
-  RETURN clampVal(cmd, pitchLo, pitchHi).
+  LOCAL cmd IS ascClampVal(fpaWanted + aoaTrim,
+                        ascFpaNow() - aoaCap, ascFpaNow() + aoaCap).
+  RETURN ascClampVal(cmd, pitchLo, pitchHi).
 }
 
 // ---------------------------------------------------------------------------
@@ -1249,7 +1249,7 @@ FUNCTION budgetLine {               // one-line dV status, used throughout
   IF DEPLOY_BEFORE_DEORBIT AND payloadMass > 1 {
     SET resNote TO "*".             // priced after the payload comes off
   }
-  RETURN "dV " + ROUND(rocketDv()) + " vs need " + ROUND(priceOfOrbit(apAlt, lossFactor)) +
+  RETURN "dV " + ROUND(ascRocketDv()) + " vs need " + ROUND(priceOfOrbit(apAlt, lossFactor)) +
          " (climb " + ROUND(dvToRaiseApTo(apAlt) * lossFactor) +
          " + circ " + ROUND(circDvAt(apAlt)) +
          " + reserve " + ROUND(reserveDvFor(apAlt)) + resNote +
@@ -1279,17 +1279,17 @@ PRINT "  Ship parts   : " + SHIP:PARTS:LENGTH + "  (payload side " + PAY_PARTS +
 PRINT "  Our tanks    : " + CORE_TANKS:LENGTH + "   separators " + SEPARATORS:LENGTH.
 IF PAY_TANKS:LENGTH > 0 {
   PRINT "  Payload tanks: " + PAY_TANKS:LENGTH + " holding LF " +
-        ROUND(listResAmt(PAY_TANKS, "LiquidFuel")) + " / Ox " +
-        ROUND(listResAmt(PAY_TANKS, "Oxidizer")) + " - NOT counted as dV.".
+        ROUND(ascListResAmt(PAY_TANKS, "LiquidFuel")) + " / Ox " +
+        ROUND(ascListResAmt(PAY_TANKS, "Oxidizer")) + " - NOT counted as dV.".
 }
 IF ISOLATE_PAYLOAD {
-  SET xfBlocked TO blockCrossfeed().
+  SET xfBlocked TO ascBlockCrossfeed().
   PRINT "  Crossfeed disabled on " + xfBlocked + " separator module(s).".
   // The separator blocking crossfeed is the clean isolation and it leaves the
   // payload's own plumbing untouched.  Only if that is unavailable do we fall
   // back to locking the payload's tanks - which the user must undo on deploy.
   IF PAY_TANKS:LENGTH > 0 AND (xfBlocked = 0 OR FORCE_TANK_LOCK) {
-    SET tkLocked TO lockPayloadTanks().
+    SET tkLocked TO ascLockPayloadTanks().
     PRINT "  !! No crossfeed toggle available - locked " + tkLocked +
           " payload resource(s) instead.".
     PRINT "     RE-ENABLE THEM after you release the payload.".
@@ -1323,7 +1323,7 @@ IF SHIP:AVAILABLETHRUST < 1 {
 setRapierMode(TRUE).
 WAIT 0.6.
 SET ccThrustAsl TO SHIP:AVAILABLETHRUST.
-SET RKT_ISP     TO measureRocketIsp().
+SET RKT_ISP     TO ascMeasureRocketIsp().
 SET RKT_ISP_ASL TO measureCurrentIsp().
 setRapierMode(FALSE).               // back to air-breathing for takeoff
 WAIT 0.6.
@@ -1339,8 +1339,8 @@ IF RKT_ISP_ASL > 0 { SET ccThrustVac TO ccThrustAsl * RKT_ISP / RKT_ISP_ASL. }
 SET launchMass TO SHIP:MASS.
 SET jetTwr     TO jetThrust / MAX(0.001, weightKN()).
 SET ROT_BONUS  TO SHIP:VELOCITY:ORBIT:MAG * SIN(LAUNCH_HEADING).
-SET lfMass0    TO coreResAmt("LiquidFuel") * LF_DENS.
-SET oxMass0    TO coreResAmt("Oxidizer") * OX_DENS.
+SET lfMass0    TO ascCoreResAmt("LiquidFuel") * LF_DENS.
+SET oxMass0    TO ascCoreResAmt("Oxidizer") * OX_DENS.
 
 // The jet phase does not cost "handover speed" - it costs handover speed plus
 // everything drag took on the way, and how much that is depends almost entirely
@@ -1351,7 +1351,7 @@ SET oxMass0    TO coreResAmt("Oxidizer") * OX_DENS.
 // figure was 3637 m/s at TWR 0.50, which the default below reproduces.
 SET planJetDv TO PLAN_JET_DV.
 IF planJetDv <= 0 {
-  SET planJetDv TO PLAN_SWITCH_SPD * PLAN_JET_DV_K * clampVal(0.5 / MAX(0.15, jetTwr), 0.7, 1.4).
+  SET planJetDv TO PLAN_SWITCH_SPD * PLAN_JET_DV_K * ascClampVal(0.5 / MAX(0.15, jetTwr), 0.7, 1.4).
 }
 SET JET_FRAC   TO jetBurnFraction(JET_ISP).
 
@@ -1417,7 +1417,7 @@ SET planDeorb  TO deorbitDvFrom(REQUESTED_APOAPSIS).
 SET planClimbDv TO planClimb * PLAN_LOSS_FACTOR.
 SET planReserve TO reserveFromHandover(REQUESTED_APOAPSIS, planClimbDv + planCirc).
 SET dvRequired TO planClimbDv + planCirc + planReserve.
-SET dvAtPad    TO rocketDv().                         // every paired unit aboard
+SET dvAtPad    TO ascRocketDv().                         // every paired unit aboard
 SET dvHandover TO dvAtHandover(0, 0).                 // what survives the jets
 SET jetLfPlan  TO jetBurnWith(0, 0, 0).
 SET lfSpare    TO lfMass0 - oxMass0 * LFO_LF_RATIO / LFO_OX_RATIO.
@@ -1563,8 +1563,8 @@ IF dvHandover >= dvRequired {
     LOCAL dvUnlocked IS dvHandoverWithPayloadFuel().
     IF dvUnlocked > dvHandover + 1 {
       PRINT "   * PAYLOAD FUEL: the cargo tanks hold " +
-            ROUND(listResAmt(PAY_TANKS, "LiquidFuel")) + " LF / " +
-            ROUND(listResAmt(PAY_TANKS, "Oxidizer")) + " Ox, locked out as cargo.".
+            ROUND(ascListResAmt(PAY_TANKS, "LiquidFuel")) + " LF / " +
+            ROUND(ascListResAmt(PAY_TANKS, "Oxidizer")) + " Ox, locked out as cargo.".
       PRINT "     Counting them would put " + ROUND(dvUnlocked) +
             " m/s at the handover instead of " + ROUND(dvHandover) + ".".
       PRINT "     SET ISOLATE_PAYLOAD TO FALSE. only if that fuel is propellant".
@@ -1626,7 +1626,7 @@ PRINT "Air-breathing climb: Q corridor from " + ROUND(AB_Q_TARGET, 2) +
 // Start from the climb the ship is already flying, not from a constant: at
 // handover speed a fixed command is a 40 deg flight path, and the nose would
 // slam to the clamp before the trim had learned anything.
-SET vsCmd     TO clampVal(SHIP:VERTICALSPEED, 30, AB_VS_MAX).
+SET vsCmd     TO ascClampVal(SHIP:VERTICALSPEED, 30, AB_VS_MAX).
 SET qTgt      TO AB_Q_TARGET.
 SET aoaTrim   TO 0.
 SET lastLoopT TO TIME:SECONDS.
@@ -1679,7 +1679,7 @@ UNTIL switchNow {
         } ELSE IF accelSm < AB_ACC_TARGET * (1 - AB_Q_ADAPT_BAND) {
           SET qTgt TO qTgt * (1 + AB_Q_ADAPT_STEP).   // starving: come back down
         }
-        SET qTgt TO clampVal(qTgt, AB_Q_TGT_MIN, AB_Q_TGT_MAX).
+        SET qTgt TO ascClampVal(qTgt, AB_Q_TGT_MIN, AB_Q_TGT_MAX).
       }
     }
 
@@ -1688,9 +1688,9 @@ UNTIL switchNow {
     // Keep the command inside what the airframe can actually fly.  A vs command
     // the pitch clamp cannot deliver is not guidance, it is integral windup.
     LOCAL vsFlyable IS SHIP:AIRSPEED * SIN(AB_FPA_MAX).
-    SET vsWant TO clampVal(vsWant, -vsFlyable, vsFlyable).
+    SET vsWant TO ascClampVal(vsWant, -vsFlyable, vsFlyable).
     // Move toward it at a bounded rate so the nose is never asked to jump.
-    SET vsCmd TO vsCmd + clampVal(vsWant - vsCmd, -AB_VS_RATE * tuneDt, AB_VS_RATE * tuneDt).
+    SET vsCmd TO vsCmd + ascClampVal(vsWant - vsCmd, -AB_VS_RATE * tuneDt, AB_VS_RATE * tuneDt).
 
     // Guards, in priority order over the corridor.
     IF SHIP:Q > AB_Q_MAX { SET vsCmd TO MAX(vsCmd, AB_VS_QCLIMB). }
@@ -1702,7 +1702,7 @@ UNTIL switchNow {
     IF SHIP:ALTITUDE < AB_DIVE_ALT_MAX AND SHIP:AIRSPEED > AB_DIVE_SPEED {
       SET vsFloor TO AB_VS_DIVE.
     }
-    SET vsCmd TO clampVal(vsCmd, vsFloor, AB_VS_MAX).
+    SET vsCmd TO ascClampVal(vsCmd, vsFloor, AB_VS_MAX).
 
     // ---- book-keeping ------------------------------------------------------
     //  The jets run on liquid fuel, and the ship carries an LF-only reserve for
@@ -1710,9 +1710,9 @@ UNTIL switchNow {
     //  oxidiser, every further second of jet burn is spent out of the rocket dV
     //  budget - worth knowing, though not worth switching for (see below).
     IF (NOT lfWarned) AND
-       coreResAmt("LiquidFuel") <= coreResAmt("Oxidizer") * LFO_LF_RATIO / LFO_OX_RATIO {
+       ascCoreResAmt("LiquidFuel") <= ascCoreResAmt("Oxidizer") * LFO_LF_RATIO / LFO_OX_RATIO {
       PRINT "  Note: LF-only reserve used up; jet burn now draws on rocket dV (" +
-            ROUND(rocketDv()) + " m/s left).".
+            ROUND(ascRocketDv()) + " m/s left).".
       SET lfWarned TO TRUE.
     }
 
@@ -1724,7 +1724,7 @@ UNTIL switchNow {
     //  airframe at the same Mach and Q - only the engine changes.
     LOCAL dragKn IS dragNow(accelSm).
     LOCAL thrRkt IS ccThrustHere().
-    LOCAL sinFpa IS clampVal(SHIP:VERTICALSPEED / MAX(50, SHIP:AIRSPEED), -1, 1).
+    LOCAL sinFpa IS ascClampVal(SHIP:VERTICALSPEED / MAX(50, SHIP:AIRSPEED), -1, 1).
     LOCAL accRkt IS (thrRkt - dragKn) / SHIP:MASS - localG() * sinFpa.
     // Flow in tonnes/s, priced in rocket-equivalent propellant: jet fuel is
     // free while an LF-only reserve remains and costs 20/9 once it is gone.
@@ -1774,7 +1774,7 @@ UNTIL switchNow {
           ROUND(qTgt, 2).
     PRINT "      vs " + ROUND(SHIP:VERTICALSPEED) + "/" + ROUND(vsCmd) +
           " | pitch " + ROUND(pitchCmd, 1) + " | thr " +
-          ROUND(100 * SHIP:AVAILABLETHRUST / MAX(1, peakJetT)) + "% | dV " + ROUND(rocketDv()).
+          ROUND(100 * SHIP:AVAILABLETHRUST / MAX(1, peakJetT)) + "% | dV " + ROUND(ascRocketDv()).
     PRINT "      cost/m/s: jet " + ROUND(1000 * costJet, 1) + " vs rocket " +
           ROUND(1000 * costRkt, 1) + " kg" .
     SET abReportT TO nowT.
@@ -1804,13 +1804,13 @@ PRINT "  Handover " + ROUND(SHIP:ALTITUDE / 1000, 1) + " km / " + ROUND(SHIP:AIR
 
 setRapierMode(TRUE).
 WAIT 0.5.                           // let the engines settle in mode
-SET RKT_ISP TO measureRocketIsp().  // now the live engines quote rocket Isp
+SET RKT_ISP TO ascMeasureRocketIsp().  // now the live engines quote rocket Isp
 
 SET targetAp    TO REQUESTED_APOAPSIS.
 SET lossFactor  TO CLIMB_LOSS_FACTOR.   // replaced by the measured value below
 SET lossMeasured TO FALSE.              // ...if the burn lasts long enough to arm it
 SET apAtSwitch  TO SHIP:APOAPSIS.
-SET dvAtSwitch  TO rocketDv().
+SET dvAtSwitch  TO ascRocketDv().
 // The efficiency yardstick is pinned to a fixed reference altitude, not to the
 // live target.  If it tracked the target, re-targeting downward would itself
 // look like progress, the measured loss factor would jump, the orbit would look
@@ -1846,7 +1846,7 @@ PRINT "  Mass " + ROUND(SHIP:MASS, 1) + " t, thrust " + ROUND(SHIP:AVAILABLETHRU
 // airframe.
 SET ccFpaHi TO CC_FPA_HI.
 IF ccFpaHi <= 0 {
-  SET ccFpaHi TO clampVal(CC_FPA_TWR_A - CC_FPA_TWR_B * twrNow(), 5, 20).
+  SET ccFpaHi TO ascClampVal(CC_FPA_TWR_A - CC_FPA_TWR_B * twrNow(), 5, 20).
 }
 // The handover state, kept for the post-flight sizing advice: this is the point
 // the whole mission is priced from, and now it is measured rather than assumed.
@@ -1904,7 +1904,7 @@ UNTIL ccDone {
   //  where apoapsis sits just above the ship, and steering on it oscillates.
   LOCAL prog IS 1.
   IF targetAp > apAtSwitch {
-    SET prog TO clampVal((SHIP:APOAPSIS - apAtSwitch) / (targetAp - apAtSwitch), 0, 1).
+    SET prog TO ascClampVal((SHIP:APOAPSIS - apAtSwitch) / (targetAp - apAtSwitch), 0, 1).
   }
   LOCAL fpaWant IS ccFpaHi + (CC_FPA_LO - ccFpaHi) * prog + fpaBias.
 
@@ -1913,7 +1913,7 @@ UNTIL ccDone {
   //  once that air is gone the climb has no payer left, so the command is
   //  capped by a schedule that decays from the handover altitude to CC_FPA_FLAT
   //  by CC_FLAT_ALT.  Whichever of the two schedules is shallower wins.
-  LOCAL altFrac IS clampVal((CC_FLAT_ALT - SHIP:ALTITUDE) /
+  LOCAL altFrac IS ascClampVal((CC_FLAT_ALT - SHIP:ALTITUDE) /
                             MAX(1, CC_FLAT_ALT - swAlt), 0, 1).
   SET fpaWant TO MIN(fpaWant, CC_FPA_FLAT + (ccFpaHi - CC_FPA_FLAT) * altFrac).
 
@@ -1946,7 +1946,7 @@ UNTIL ccDone {
   IF NOT emergency {
     LOCAL tapShort IS CC_TAP_MIN - apexTimeEst().
     IF tapShort > 0 {
-      SET fpaWant TO fpaWant + clampVal(CC_TAP_GAIN * tapShort, 0, CC_TAP_MAX_ADD).
+      SET fpaWant TO fpaWant + ascClampVal(CC_TAP_GAIN * tapShort, 0, CC_TAP_MAX_ADD).
     }
   }
 
@@ -1956,9 +1956,9 @@ UNTIL ccDone {
   // ---- dV policing --------------------------------------------------------
   IF nowT - lastPolT >= CC_POLICE_DT {
     SET lastPolT TO nowT.
-    LOCAL dvNow IS rocketDv().
+    LOCAL dvNow IS ascRocketDv().
 
-    // Floor 0: the engine has stopped.  rocketDv() prices the propellant in our
+    // Floor 0: the engine has stopped.  ascRocketDv() prices the propellant in our
     // tanks; it cannot tell whether the engines can still reach it.  When they
     // cannot, every exit below is unreachable - apoapsis stops rising, so the
     // target is never met, and the dV reading freezes, so the glide reserve is
@@ -1983,14 +1983,14 @@ UNTIL ccDone {
         IF dvNow > DV_GLIDE_RESERVE {
           PRINT "   The tanks still price " + ROUND(dvNow) + " m/s, so this is a feed".
           PRINT "   or ignition fault, not an empty ship:".
-          PRINT "     core LF " + ROUND(coreResAmt("LiquidFuel")) + " / Ox " +
-                ROUND(coreResAmt("Oxidizer")) + "  (burned as " + ROUND(LFO_LF_RATIO) +
+          PRINT "     core LF " + ROUND(ascCoreResAmt("LiquidFuel")) + " / Ox " +
+                ROUND(ascCoreResAmt("Oxidizer")) + "  (burned as " + ROUND(LFO_LF_RATIO) +
                 ":" + ROUND(LFO_OX_RATIO) + " pairs)".
           IF anyFlameout() { PRINT "     at least one engine reports FLAMEOUT.". }
           IF PAY_TANKS:LENGTH > 0 {
             PRINT "     payload tanks (locked out) hold LF " +
-                  ROUND(listResAmt(PAY_TANKS, "LiquidFuel")) + " / Ox " +
-                  ROUND(listResAmt(PAY_TANKS, "Oxidizer")) + ".".
+                  ROUND(ascListResAmt(PAY_TANKS, "LiquidFuel")) + " / Ox " +
+                  ROUND(ascListResAmt(PAY_TANKS, "Oxidizer")) + ".".
           }
         }
         PRINT "======================================================".
@@ -2064,7 +2064,7 @@ UNTIL ccDone {
     IF spent > FEAS_ARM_DV {
       LOCAL paidAll IS price0 - priceNow.
       IF paidAll > 1 {
-        SET lossWhole TO clampVal(spent / paidAll, 1, 12).
+        SET lossWhole TO ascClampVal(spent / paidAll, 1, 12).
       } ELSE {
         SET lossWhole TO 12.
       }
@@ -2079,7 +2079,7 @@ UNTIL ccDone {
     IF spentWin >= EFF_WINDOW_DV {
       LOCAL paidWin IS effMarkPrice - priceNow.
       LOCAL winLoss IS 12.          // spending dV and buying nothing
-      IF paidWin > 1 { SET winLoss TO clampVal(spentWin / paidWin, 1, 12). }
+      IF paidWin > 1 { SET winLoss TO ascClampVal(spentWin / paidWin, 1, 12). }
       SET lossFactor TO winLoss.
       IF winLoss >= 12 { SET deadWindows TO deadWindows + 1. }
       ELSE { SET deadWindows TO 0. }
@@ -2165,12 +2165,12 @@ UNTIL ccDone {
     PRINT "  AP " + ROUND(SHIP:APOAPSIS / 1000, 1) + "/" + ROUND(targetAp / 1000) +
           " km | alt " + ROUND(SHIP:ALTITUDE / 1000, 1) + " km | " +
           ROUND(SHIP:VELOCITY:ORBIT:MAG) + " m/s".
-    PRINT "      fpa " + ROUND(fpaNow(), 1) + "/" + ROUND(fpaWant, 1) + " | pitch " +
+    PRINT "      fpa " + ROUND(ascFpaNow(), 1) + "/" + ROUND(fpaWant, 1) + " | pitch " +
           ROUND(pitchCmd, 1) + " | acc " + ROUND(accelNow, 2) + " | TWR " +
-          ROUND(twrNow(), 2) + " | dV " + ROUND(rocketDv()).
+          ROUND(twrNow(), 2) + " | dV " + ROUND(ascRocketDv()).
     // AoA and the drag it is buying, because this is where the climb is won or
     // lost and neither was visible on the flight that spent 330 m/s to buy 40.
-    PRINT "      AoA " + ROUND(pitchCmd - fpaNow(), 1) + "/" + ROUND(aoaCap, 1) +
+    PRINT "      AoA " + ROUND(pitchCmd - ascFpaNow(), 1) + "/" + ROUND(aoaCap, 1) +
           " | Q " + ROUND(SHIP:Q, 3) + " | drag " + ROUND(dragNow(accelNow)) + " kN".
     // The loss factor every cycle, not only when it triggers a verdict.  On the
     // reference flights the first anyone heard of it was the abort message.
@@ -2204,7 +2204,7 @@ IF orbitAlt < ATM_TOP + 2000 {
   PRINT "   barely above the atmosphere and there is no dV to fix it.".
   PRINT "   Not circularising - the ship is already on a reentry path, so".
   PRINT "   fly it home as a glider (no deorbit burn required).".
-  PRINT "   Fuel kept back: " + ROUND(rocketDv()) + " m/s.".
+  PRINT "   Fuel kept back: " + ROUND(ascRocketDv()) + " m/s.".
   PRINT "======================================================".
   UNLOCK STEERING.
   UNLOCK THROTTLE.
@@ -2227,7 +2227,7 @@ IF NOT abortSuborbital {
   // the ship is still under its apoapsis and prograde thrust still moves it.
   // Only ever with money that is not already promised to the circularisation
   // and the deorbit, and never below the glide reserve.
-  SET trimDv0 TO rocketDv().
+  SET trimDv0 TO ascRocketDv().
   SET trimOn  TO FALSE.
   SET trimT   TO TIME:SECONDS.
   UNTIL SHIP:ALTITUDE > ATM_TOP OR SHIP:VERTICALSPEED < 0 {
@@ -2235,7 +2235,7 @@ IF NOT abortSuborbital {
       SET trimT TO TIME:SECONDS.
       LOCAL apLack IS targetAp - SHIP:APOAPSIS.
       LOCAL keep IS MAX(circDvAt(targetAp) + reserveDvFor(targetAp), DV_GLIDE_RESERVE).
-      LOCAL dvHere IS rocketDv().     // read once - it is not cheap in kOS
+      LOCAL dvHere IS ascRocketDv().     // read once - it is not cheap in kOS
       IF apLack > COAST_TRIM_TOL AND dvHere > keep {
         SET thrCmd TO COAST_TRIM_THR.
         SET trimOn TO TRUE.
@@ -2248,12 +2248,12 @@ IF NOT abortSuborbital {
   SET thrCmd TO 0.
   IF trimOn {
     PRINT "Coast trim held the apoapsis through the air for " +
-          ROUND(trimDv0 - rocketDv()) + " m/s.".
+          ROUND(trimDv0 - ascRocketDv()) + " m/s.".
   }
   IF SHIP:ALTITUDE < ATM_TOP {
     SET abortSuborbital TO TRUE.
     PRINT "!! Apoapsis passed inside the atmosphere - no vacuum burn is possible.".
-    PRINT "   Handing back to the pilot with " + ROUND(rocketDv()) + " m/s in hand.".
+    PRINT "   Handing back to the pilot with " + ROUND(ascRocketDv()) + " m/s in hand.".
     UNLOCK STEERING.
     UNLOCK THROTTLE.
     SAS ON.
@@ -2278,8 +2278,8 @@ IF NOT abortSuborbital {
   // Half the burn before apoapsis and half after is what keeps the ship near the
   // altitude it is circularising at.  The taper at the end is part of the burn,
   // so it is part of what has to be centred.
-  SET circBurn TO burnTimeFor(circDv) + CIRC_TAPER_T.
-  SET circLead TO clampVal(circBurn / 2, 5, 150).
+  SET circBurn TO ascBurnTimeFor(circDv) + CIRC_TAPER_T.
+  SET circLead TO ascClampVal(circBurn / 2, 5, 150).
   PRINT "Vacuum. ETA to apoapsis " + ROUND(ETA:APOAPSIS) + " s; circ burn ~" +
         ROUND(circBurn) + " s, starting " + ROUND(circLead) + " s early.".
 
@@ -2306,7 +2306,7 @@ IF NOT abortSuborbital {
   IF SHIP:VERTICALSPEED < 0 AND SHIP:ALTITUDE < ATM_TOP AND SHIP:PERIAPSIS < ATM_TOP {
     SET abortSuborbital TO TRUE.
     PRINT "!! Descending back into the atmosphere with apoapsis behind us -".
-    PRINT "   there is no circularisation to make. Keeping " + ROUND(rocketDv()) +
+    PRINT "   there is no circularisation to make. Keeping " + ROUND(ascRocketDv()) +
           " m/s and handing back for the glide.".
     SET thrCmd TO 0.
     UNLOCK STEERING.
@@ -2385,7 +2385,7 @@ IF NOT abortSuborbital {
       IF accNow <= 0.01 {
         SET thrCmd TO 1.
       } ELSE {
-        SET thrCmd TO clampVal(circGo / (accNow * CIRC_TAPER_T), CIRC_THR_MIN, 1).
+        SET thrCmd TO ascClampVal(circGo / (accNow * CIRC_TAPER_T), CIRC_THR_MIN, 1).
       }
 
       IF circGo < circBest { SET circBest TO circGo. }
@@ -2410,7 +2410,7 @@ IF NOT abortSuborbital {
       }
 
       // Hard stop: we will not eat the deorbit money to buy a rounder orbit.
-      // (Polled a few times a second - rocketDv() is not cheap in kOS.)
+      // (Polled a few times a second - ascRocketDv() is not cheap in kOS.)
       //
       // But the deorbit reserve is only worth protecting while there is going to
       // be an orbit to deorbit *from*.  Until periapsis is clear of the air the
@@ -2424,7 +2424,7 @@ IF NOT abortSuborbital {
         IF SHIP:PERIAPSIS >= ATM_TOP {
           SET circFloor TO MAX(reserveDvFor(orbitAlt), DV_GLIDE_RESERVE).
         }
-        IF rocketDv() <= circFloor {
+        IF ascRocketDv() <= circFloor {
           SET thrCmd TO 0.
           SET circStarved TO TRUE.
           SET circDone TO TRUE.
@@ -2479,7 +2479,7 @@ IF circStarved {
   }
 }
 
-SET dvLeft  TO rocketDv().
+SET dvLeft  TO ascRocketDv().
 SET dvDeorb TO deorbitDvFrom(SHIP:APOAPSIS).
 IF NOT inOrbit { SET dvDeorb TO 0. }   // nothing to deorbit from
 PRINT "======================================================".
@@ -2521,21 +2521,21 @@ PRINT "  Deorbit    : " + ROUND(dvDeorb) + " m/s  ->  spare after deorbit " +
 // tonnes in the tank are worth far more.  Budgeting the reserve at the heavy
 // mass is a real reserve the ship does not need to carry, and on a 27% payload
 // fraction it is most of the reserve.
-IF payloadMass > 1 AND rocketPropMass() > 0 {
+IF payloadMass > 1 AND ascRocketPropMass() > 0 {
   LOCAL mLight IS SHIP:MASS - payloadMass.
-  IF mLight > rocketPropMass() {
-    LOCAL dvLight IS RKT_ISP * G0 * LN(mLight / (mLight - rocketPropMass())).
+  IF mLight > ascRocketPropMass() {
+    LOCAL dvLight IS RKT_ISP * G0 * LN(mLight / (mLight - ascRocketPropMass())).
     PRINT "  After release of " + ROUND(payloadMass, 1) + " t of payload the same".
     PRINT "  propellant is worth " + ROUND(dvLight) + " m/s (x" +
           ROUND(dvLight / MAX(1, dvLeft), 2) + ") - deploy before deorbiting.".
   }
 }
-PRINT "  Fuel -- LF: " + ROUND(coreResAmt("LiquidFuel")) +
-      " , Ox: " + ROUND(coreResAmt("Oxidizer")) +
-      " , Mono: " + ROUND(resAmtShip("MonoPropellant")).
+PRINT "  Fuel -- LF: " + ROUND(ascCoreResAmt("LiquidFuel")) +
+      " , Ox: " + ROUND(ascCoreResAmt("Oxidizer")) +
+      " , Mono: " + ROUND(ascResAmtShip("MonoPropellant")).
 IF PAY_TANKS:LENGTH > 0 {
-  PRINT "  Payload LF/Ox (locked out): " + ROUND(listResAmt(PAY_TANKS, "LiquidFuel")) +
-        " / " + ROUND(listResAmt(PAY_TANKS, "Oxidizer")).
+  PRINT "  Payload LF/Ox (locked out): " + ROUND(ascListResAmt(PAY_TANKS, "LiquidFuel")) +
+        " / " + ROUND(ascListResAmt(PAY_TANKS, "Oxidizer")).
 }
 // Answer the funding question at the mass the burn will be flown at.  dvLeft is
 // a reading on the ship as it sits, cargo aboard; comparing it against a deorbit
@@ -2544,8 +2544,8 @@ IF PAY_TANKS:LENGTH > 0 {
 IF NOT inOrbit {
   PRINT "  No deorbit burn required - the trajectory already reenters.".
 } ELSE {
-  LOCAL needFunded IS heavyEquivalentOf(dvDeorb + DV_MARGIN).
-  LOCAL needBare   IS heavyEquivalentOf(dvDeorb).
+  LOCAL needFunded IS ascHeavyEquivalentOf(dvDeorb + DV_MARGIN).
+  LOCAL needBare   IS ascHeavyEquivalentOf(dvDeorb).
   IF DEPLOY_BEFORE_DEORBIT AND payloadMass > 1 {
     PRINT "  Deorbit costs " + ROUND(needBare) + " m/s of what is on the gauge now" +
           " (" + ROUND(dvDeorb) + " m/s after release).".

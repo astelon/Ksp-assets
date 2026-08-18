@@ -18,6 +18,14 @@ mechanical enough to spot from the text alone:
      character, so \" closes the string instead of embedding a quote, and
      the error it eventually reports points at the next word rather than at
      the backslash.
+  5. Top-level function names shared between two scripts.  This one is only
+     visible when several files are checked at once, and it is the reason to
+     pass scripts/*.ks rather than one file at a time.  A program's file-scope
+     functions are GLOBAL in kOS and outlive the program, so when one script
+     hands over to another - intercept.ks chains ascent, rendezvous and dock
+     inside one session - a name they share resolves to whichever was declared
+     first.  Different argument counts crash at the call.  The same argument
+     count does not: it quietly runs the wrong function.
 
 Usage:  python3 tools/check_kos.py scripts/*.ks
 Exit status is 1 if anything was reported, so it drops into a git hook or CI.
@@ -195,6 +203,34 @@ def check_functions(body, problems):
                                  f"'{m.group(1)}' called with {got} argument(s), defined with {defined[name]}"))
 
 
+# Functions declared at a file's top level, i.e. at column 0.  Anything indented
+# is inside another construct and is not what leaks into the global scope.
+TOPLEVEL_FUNC_RE = re.compile(r"^FUNCTION\s+(\w+)", re.M)
+
+
+def toplevel_functions(path):
+    with open(path) as handle:
+        return set(TOPLEVEL_FUNC_RE.findall(strip_noise(handle.read())))
+
+
+def check_collisions(paths):
+    """Report top-level function names declared in more than one file."""
+    owners = {}
+    for path in paths:
+        for name in toplevel_functions(path):
+            owners.setdefault(name.lower(), []).append((path, name))
+    shared = {k: v for k, v in owners.items() if len(v) > 1}
+    if not shared:
+        return 0
+    print("\nshared top-level function names (kOS puts these in one global scope,")
+    print("so whichever script runs first wins for the rest of the session):")
+    for key in sorted(shared):
+        where = ", ".join(f"{path}:{name}" for path, name in shared[key])
+        print(f"  {shared[key][0][1]}: {where}")
+    print("  Give each script its own prefix for names it shares with another.")
+    return len(shared)
+
+
 def check_file(path):
     with open(path) as handle:
         raw = handle.read()
@@ -228,6 +264,8 @@ def main(argv):
         print(__doc__)
         return 2
     total = sum(check_file(path) for path in argv)
+    if len(argv) > 1:
+        total += check_collisions(argv)
     if total:
         print(f"\n{total} problem(s) found.")
     return 1 if total else 0
