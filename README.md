@@ -90,6 +90,13 @@ cp scripts/intercept.ks scripts/ascent.ks scripts/rendezvous.ks scripts/dock.ks 
 
 (`Ships/Script/` is kOS's archive folder — it's the `0:` volume in the terminal.)
 
+**Re-copy all five whenever you update.** They are a set and they call each
+other, so a stale copy of one is a mission that dies at the hand-over — an old
+`ascent.ks` that predates its apoapsis argument will refuse the call at T-0,
+after the launch window it just waited hours for. `intercept.ks` checks the
+copies it can see for this before it starts counting down, but it can only
+check the ones you gave it.
+
 ---
 
 ## Quick start

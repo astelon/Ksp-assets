@@ -751,6 +751,80 @@ FUNCTION itcHandBack {
 }
 
 // ---------------------------------------------------------------------------
+//  The scripts this one hands over to
+//
+//  Chaining scripts means depending on their argument lists, and an argument
+//  list is not something kOS will let you ask about - it finds out by calling,
+//  which here happens after the countdown, at T-0, having warped through a
+//  launch window that took hours to come round.  That is the most expensive
+//  possible moment to discover that the ascent.ks sitting on the archive is an
+//  older copy that takes no arguments at all.
+//
+//  So the file is read instead.  Program parameters have to be declared before
+//  any other statement runs, so counting the DECLARE PARAMETER names above the
+//  first real line of code gives the number this script may pass - without
+//  running anything.  It is a text scan and it knows it: a default value
+//  containing a comma would miscount, and anything it cannot read at all
+//  returns -1, which is reported as "could not check" rather than as a fault.
+//  A check that fails closed on its own uncertainty is worse than no check.
+// ---------------------------------------------------------------------------
+FUNCTION itcScriptPath {
+  PARAMETER nm.
+  LOCAL p2 IS ITC_HOME + nm + ".ks".
+  IF EXISTS(p2) { RETURN p2. }
+  LOCAL p1 IS ITC_HOME + nm.
+  IF EXISTS(p1) { RETURN p1. }
+  RETURN "".
+}
+
+FUNCTION itcFileText {
+  PARAMETER pathIn.
+  IF pathIn = "" { RETURN "". }
+  IF NOT EXISTS(pathIn) { RETURN "". }
+  LOCAL fh IS OPEN(pathIn).
+  IF NOT fh:HASSUFFIX("READALL") { RETURN "". }
+  LOCAL raw IS fh:READALL.
+  // kOS 1.x hands back a FileContent; older versions handed back the string
+  // itself.  Ask which one this is rather than assuming.
+  IF raw:HASSUFFIX("STRING") { RETURN raw:STRING. }
+  IF raw:ISTYPE("String") { RETURN raw. }
+  RETURN "".
+}
+
+FUNCTION itcParamCount {
+  PARAMETER pathIn.
+  LOCAL txt IS itcFileText(pathIn).
+  IF txt = "" { RETURN -1. }
+  IF NOT txt:HASSUFFIX("SPLIT") { RETURN -1. }
+  IF NOT txt:HASSUFFIX("TRIM") { RETURN -1. }
+  LOCAL total IS 0.
+  // Not `ln` and not `up`: LN() is a built-in function and UP is a bound
+  // variable, and kOS refuses to compile a script that declares over either.
+  FOR srcLine IN txt:SPLIT(CHAR(10)) {
+    LOCAL t IS srcLine:TRIM.
+    IF t <> "" {
+      IF NOT t:STARTSWITH("//") {
+        LOCAL upper IS t:TOUPPER.
+        LOCAL head IS "".
+        IF upper:STARTSWITH("DECLARE PARAMETER") { SET head TO "DECLARE PARAMETER". }
+        ELSE IF upper:STARTSWITH("PARAMETER ")   { SET head TO "PARAMETER". }
+        IF head = "" {
+          // First statement that is not a parameter declaration: whatever the
+          // rest of the file says, the program's own list ends here.
+          RETURN total.
+        }
+        LOCAL rest IS t:SUBSTRING(head:LENGTH, t:LENGTH - head:LENGTH):TRIM.
+        IF rest:ENDSWITH(".") { SET rest TO rest:SUBSTRING(0, rest:LENGTH - 1). }
+        FOR piece IN rest:SPLIT(",") {
+          IF piece:TRIM <> "" { SET total TO total + 1. }
+        }
+      }
+    }
+  }
+  RETURN total.
+}
+
+// ---------------------------------------------------------------------------
 //  Calibration file
 //
 //  The ascent model is two numbers, and the only honest source for them is the
@@ -973,15 +1047,47 @@ IF ITC_GO {
 IF ITC_GO {
   SET ITC_MISSING TO "".
   FOR nm IN LIST(ITC_ASCENT, ITC_RENDEZ, ITC_DOCK) {
-    LOCAL p1 IS ITC_HOME + nm.
-    LOCAL p2 IS ITC_HOME + nm + ".ks".
-    IF NOT (EXISTS(p1) OR EXISTS(p2)) { SET ITC_MISSING TO ITC_MISSING + " " + nm. }
+    IF itcScriptPath(nm) = "" { SET ITC_MISSING TO ITC_MISSING + " " + nm. }
   }
   IF ITC_MISSING <> "" {
     PRINT "!! Cannot find these scripts on """ + ITC_HOME + """:" + ITC_MISSING.
     PRINT "   Copy them alongside this one, or set ITC_HOME (e.g. ""0:/"").".
     SET ITC_GO TO FALSE.
     SET ITC_WHY TO "missing scripts".
+  }
+}
+
+// --- 0d2. ...and will they take the arguments we are going to pass? ---------
+//  Being there is not the same as being the right vintage.  This script calls
+//  ascent with a parking apoapsis, rendezvous with a name and a park distance,
+//  and dock with a port hint and a standoff; an older copy of any of them
+//  declares fewer parameters and refuses the call.  kOS reports that as "called
+//  with too many arguments" at whatever line the older file happens to start
+//  on, which is a long way from saying "your ascent.ks is out of date".
+IF ITC_GO {
+  SET ITC_STALE TO "".
+  SET ITC_UNSURE TO "".
+  FOR pair IN LIST(LIST(ITC_ASCENT, 1), LIST(ITC_RENDEZ, 2), LIST(ITC_DOCK, 2)) {
+    LOCAL nm   IS pair[0].
+    LOCAL want IS pair[1].
+    LOCAL got  IS itcParamCount(itcScriptPath(nm)).
+    IF got < 0 {
+      SET ITC_UNSURE TO ITC_UNSURE + " " + nm.
+    } ELSE IF got < want {
+      SET ITC_STALE TO ITC_STALE + " " + nm + " (takes " + got + ", called with " +
+                       want + ")".
+    }
+  }
+  IF ITC_UNSURE <> "" {
+    PRINT "   Could not read, so could not check:" + ITC_UNSURE + ".".
+  }
+  IF ITC_STALE <> "" {
+    PRINT "!! These scripts are older than this one expects:" + ITC_STALE + ".".
+    PRINT "   They would refuse the call at T-0, after the wait for the window.".
+    PRINT "   Re-copy all of scripts/*.ks to the archive - they are a set, and".
+    PRINT "   they call each other.".
+    SET ITC_GO TO FALSE.
+    SET ITC_WHY TO "stale scripts on the archive".
   }
 }
 
