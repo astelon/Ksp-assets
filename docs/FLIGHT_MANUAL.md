@@ -77,10 +77,27 @@ Three things to expect:
   is retrograde.
 
 If anything fails a pre-flight check the ship never moves, and the reason is
-printed. `ITC_RUN_ASC`, `ITC_RUN_RDV` and `ITC_RUN_DOCK` can each be set `FALSE`
-inside the script to rehearse the window solver and the checks without flying
-anything. See [`docs/INTERCEPT.md`](INTERCEPT.md) for the derivation, the
-tunables, and how the geometry was verified outside the game.
+printed. Set `ITC_RUN_ASC`, `ITC_RUN_RDV` and `ITC_RUN_DOCK` all `FALSE` inside
+the script to rehearse the window solver and the pre-flight checks without
+flying — or waiting for — any of it. That is the cheapest way to see what the
+script makes of a target.
+
+Two lines in the pre-flight are worth reading rather than scrolling past, and
+both exist because a real flight went wrong:
+
+* **`Sweep : x deg/s measured (y from the periods)`.** Those are the same
+  quantity computed two ways, and they should match. If they do not, the
+  prediction the window was solved in is not the orbit the target is on, and the
+  launch time under it is worthless — the script says so in as many words.
+* **`Scripts: ascent(1) rendezvous(2) dock(2) parameters.`** It reads the three
+  scripts it is about to run and counts what each declares, because kOS treats
+  an argument-count mismatch as a fatal error and there is no way to catch one.
+  If your `ascent.ks` takes no apoapsis, this script cannot choose the parking
+  orbit and says so on the ground — set `ITC_PARK_FIXED` to the altitude yours
+  flies to, and the window is planned around that instead.
+
+See [`docs/INTERCEPT.md`](INTERCEPT.md) for the derivation, the tunables, how
+the geometry was verified outside the game, and what that first flight found.
 
 ### To orbit
 

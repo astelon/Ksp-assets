@@ -173,10 +173,34 @@ SET ITC_BUF_MAX   TO 5400.        // ...nor more than this (s).  Against a
 SET ITC_MIN_LEAD  TO 90.          // no window closer than this - the pre-flight
                                   // checks and ascent.ks's own take time (s)
 SET ITC_MAX_WAIT  TO 21600.       // how far ahead to look for one (s)
-SET ITC_SCAN_STEP TO 20.          // scan resolution (s).  The phase moves at
-                                  // ~0.17 deg/s against an LKO station, so this
-                                  // samples about every 3 degrees
+SET ITC_SCAN_STEP TO 20.          // fallback scan resolution (s).  Only used if
+                                  // the closed-form solution fails, and capped
+                                  // at a 24th of a sweep either way so it can
+                                  // never step over a crossing
 SET ITC_BISECT    TO 30.          // bisection rounds once a crossing is bracketed
+SET ITC_WIN_TOL   TO 0.05.        // insertion phase error accepted from the
+                                  // closed form before it is refined (deg)
+SET ITC_SWEEP_TOL TO 0.10.        // how far the measured sweep rate may differ
+                                  // from the one the orbital periods say it
+                                  // must be, as a fraction, before the target
+                                  // prediction is declared untrustworthy
+SET ITC_TGT_MODEL TO "auto".      // how the target's future position is found:
+                                  // "posat"  - kOS POSITIONAT, exact for any
+                                  //            orbit but built on kOS's own
+                                  //            frame handling, which a flight
+                                  //            has shown cannot be assumed from
+                                  //            a landed ship
+                                  // "rotate" - rotate its present position
+                                  //            about its orbit normal, exact
+                                  //            for a circular orbit and free of
+                                  //            any frame assumption at all
+                                  // "auto"   - rotate for a near-circular
+                                  //            target, posat for an eccentric
+                                  //            one that the cross-check agrees
+                                  //            with.  Either way the two are
+                                  //            compared and the answer printed
+SET ITC_ECC_CIRC  TO 0.01.        // eccentricity under which "circular" is a
+                                  // fair description of the target's orbit
 
 // --- Handover checks --------------------------------------------------------
 SET ITC_PLANE_SKIP_DI TO 0.05.    // relative inclination under this is nothing
@@ -193,6 +217,11 @@ SET ITC_MONO_DOCK    TO 40.       // rough monopropellant the docking approach
                                   // wants (units).  dock.ks prices it properly;
                                   // this only catches a ship launched dry
 SET ITC_HOLD         TO 12.       // pause this long on a failed check (s)
+SET ITC_PARK_FIXED   TO 0.        // metres.  Only for an ascent script that
+                                  // cannot be told an apoapsis: set it to the
+                                  // orbit yours actually flies to, and the
+                                  // window is planned around that instead of
+                                  // around an orbit we can choose
 
 // --- Chaining ---------------------------------------------------------------
 SET ITC_HOME     TO "".           // volume/directory the three scripts live in,
@@ -200,9 +229,18 @@ SET ITC_HOME     TO "".           // volume/directory the three scripts live in,
 SET ITC_ASCENT   TO "ascent".
 SET ITC_RENDEZ   TO "rendezvous".
 SET ITC_DOCK     TO "dock".
-SET ITC_RUN_ASC  TO TRUE.         // set any of these FALSE to rehearse the
-SET ITC_RUN_RDV  TO TRUE.         // window solver and the checks without
-SET ITC_RUN_DOCK TO TRUE.         // actually flying the mission
+SET ITC_RUN_ASC  TO TRUE.         // set all three FALSE to rehearse the window
+SET ITC_RUN_RDV  TO TRUE.         // solver and the pre-flight checks without
+SET ITC_RUN_DOCK TO TRUE.         // flying, or waiting, for any of it
+SET ITC_CHECK_ARGS TO TRUE.       // read the three scripts and count the
+                                  // parameters they declare, so they are called
+                                  // the way they are actually written rather
+                                  // than the way this script expects.  Set
+                                  // FALSE (and fix the counts below) if your
+                                  // kOS cannot read a file as text
+SET ITC_ASC_PARAMS  TO -1.        // -1 = detect. Otherwise the number of
+SET ITC_RDV_PARAMS  TO -1.        // parameters each script takes; the versions
+SET ITC_DOCK_PARAMS TO -1.        // in this repository take 1, 2 and 2
 
 // --- Calibration ------------------------------------------------------------
 SET ITC_USE_CAL  TO TRUE.
@@ -310,13 +348,34 @@ FUNCTION itcRefresh {
   SET ITC_KHAT TO VCRS(ITC_R0, ITC_V0):NORMALIZED.
 }
 
-FUNCTION itcSpinVec {               // rotate vecIn about the spin axis by degIn
-  PARAMETER vecIn, degIn.
-  LOCAL par  IS ITC_KHAT * VDOT(vecIn, ITC_KHAT).
+// The same reading, taken of the target: where it is, which way round its orbit
+// goes, and how fast.  Two vectors and a rate are enough to say where it will
+// be, and unlike a stored prediction they are re-read whenever we ask.
+FUNCTION itcTgtCapture {
+  SET ITC_TGT_R0 TO ITC_TGT:POSITION - SHIP:BODY:POSITION.
+  SET ITC_TGT_V0 TO ITC_TGT:VELOCITY:ORBIT.
+  SET ITC_H_TGT  TO VCRS(ITC_TGT_R0, ITC_TGT_V0).
+  SET ITC_H_HAT  TO ITC_H_TGT:NORMALIZED.
+  SET ITC_W_TGT  TO 360 / MAX(1, ITC_TGT:OBT:PERIOD).
+}
+
+// Rotate a vector about an axis, in the direction that carries it the way it is
+// already travelling.  Handedness-free for the same reason the rest of this
+// file is: the axis is itself a cross product of a position and a velocity, and
+// this uses it inside a second one, so a sign convention on the operator
+// cancels.  (r x v) x r = v (r.r) under either rule.
+FUNCTION itcRotAbout {
+  PARAMETER vecIn, axisHat, degIn.
+  LOCAL par  IS axisHat * VDOT(vecIn, axisHat).
   LOCAL perp IS vecIn - par.
   IF perp:MAG < 0.001 { RETURN vecIn. }
-  LOCAL side IS VCRS(ITC_KHAT, perp).   // 90 deg on, the way the surface goes
+  LOCAL side IS VCRS(axisHat, perp).    // 90 deg on, the way the motion goes
   RETURN par + perp * COS(degIn) + side * SIN(degIn).
+}
+
+FUNCTION itcSpinVec {               // rotate vecIn about the spin axis by degIn
+  PARAMETER vecIn, degIn.
+  RETURN itcRotAbout(vecIn, ITC_KHAT, degIn).
 }
 
 FUNCTION itcSiteAt {                // where the launch site is at UT tUT
@@ -335,6 +394,41 @@ FUNCTION itcInsertAt {              // ...and where the ascent puts us if we go 
 FUNCTION itcRelPosAt {
   PARAMETER orbtbl, tUT.
   RETURN POSITIONAT(orbtbl, tUT) - POSITIONAT(SHIP:BODY, tUT).
+}
+
+// ---------------------------------------------------------------------------
+//  Where the TARGET will be - two ways, and they are checked against each other
+//
+//  The obvious way is POSITIONAT, which is what rendezvous.ks uses and what
+//  this script used to use.  The other way needs nothing but a position, an
+//  orbit normal and a period: on a circular orbit the future position is the
+//  present one rotated about the normal, which is the same construction the
+//  launch site gets, for the same reason.
+//
+//  Both are computed and compared at pre-flight, because a launch window is
+//  built entirely on this prediction and a prediction that is quietly not
+//  advancing produces a window that looks perfectly reasonable and is a
+//  half-day out.  A disagreement is not resolved by picking a favourite: the
+//  rotation is exact for a circular orbit and needs no frame assumptions, so
+//  that is what a failed cross-check falls back to, and it is said out loud.
+// ---------------------------------------------------------------------------
+FUNCTION itcTgtRotAt {              // circular propagation from the reading now
+  PARAMETER tUT.
+  RETURN itcRotAbout(ITC_TGT_R0, ITC_H_HAT, ITC_W_TGT * (tUT - ITC_TREF)).
+}
+
+FUNCTION itcTgtPosAt {
+  PARAMETER tUT.
+  IF ITC_TGT_MODEL = "rotate" { RETURN itcTgtRotAt(tUT). }
+  RETURN itcRelPosAt(ITC_TGT, tUT).
+}
+
+// How far apart the two models are, a third of an orbit out - far enough that a
+// prediction which is not moving cannot hide, near enough that eccentricity has
+// not had time to separate them much.
+FUNCTION itcTgtModelGap {
+  LOCAL tAhead IS ITC_TREF + ITC_TGT:OBT:PERIOD / 3.
+  RETURN VANG(itcTgtRotAt(tAhead), itcRelPosAt(ITC_TGT, tAhead)).
 }
 
 // Signed phase angle from us to them, measured in the plane the ascent will
@@ -445,7 +539,7 @@ FUNCTION itcWantedPhase {
 // The phase this launch time would produce at insertion, under the ascent model.
 FUNCTION itcPhaseIfLaunchedAt {
   PARAMETER tUT.
-  RETURN itcPhaseOf(itcInsertAt(tUT), itcRelPosAt(ITC_TGT, tUT + ITC_ASC_TIME)).
+  RETURN itcPhaseOf(itcInsertAt(tUT), itcTgtPosAt(tUT + ITC_ASC_TIME)).
 }
 
 FUNCTION itcWindowErrAt {           // how wrong that would be, in degrees
@@ -456,62 +550,139 @@ FUNCTION itcWindowErrAt {           // how wrong that would be, in degrees
 // ---------------------------------------------------------------------------
 //  The window search
 //
-//  The error above sweeps through 360 degrees at a rate set by the difference
-//  between the target's orbital rate and the body's rotation rate - about
-//  0.17 deg/s against a 100 km station on Kerbin, so a window every 36 minutes.
-//  It is a smooth function of the launch time apart from one artificial jump
-//  where the wrap happens, so: scan for a sign change that is not that jump,
-//  then bisect it.  The earliest crossing wins; a later one is the same window
-//  a lap later, and a lap later is time spent for nothing.
+//  The error is a straight line in the launch time, and that is not an
+//  approximation: our insertion point goes round at the body's rotation rate,
+//  the target goes round at its own, and the difference between them is a
+//  constant.  So the root is a division, not a search:
 //
-//  Two things can go wrong, and neither of them may be allowed to look like
-//  success.  A target in a synchronous orbit turns at the same rate as the body
-//  underneath it, so the error never sweeps and no window exists - the phase is
-//  whatever it is and the phasing has to be solved in orbit.  A target with a
-//  period very close to synchronous has one, but it is hours out.  Both are
-//  reported, and the fallback is the best launch time inside the horizon rather
-//  than a pretence that a window was found.
+//      sweep    = d(error) / d(launch time)    measured over a short baseline
+//      t_window = t_start - error(t_start) / sweep,  brought forward a lap at
+//                                                    a time until it is ahead
+//
+//  MEASURED, not assumed, and that word is doing real work.  The sweep can also
+//  be written down in one line from the two periods - and if the prediction the
+//  script is actually using disagrees with that line, then something in the
+//  prediction is wrong and every launch time built on it is wrong with it.  So
+//  the rate is taken from the very function the root will be found in, the
+//  analytic value is computed beside it, and the two are printed together.  A
+//  blind scan cannot do that: it returns a time either way, and says nothing
+//  about whether the world it searched resembles the one outside.
+//
+//  The closed form is then VERIFIED rather than trusted - an eccentric target
+//  does not sweep quite uniformly - and a local bisection cleans up whatever
+//  the eccentricity left.  Only if all of that fails does it fall back to
+//  sweeping the whole horizon, and then with a step small enough that it cannot
+//  alias.  A fixed step against a fast sweep steps straight over crossings,
+//  eventually finds one that happens to land inside a step, and reports a
+//  window hours away with complete confidence.
+//
+//  Two things can still legitimately produce no window.  A target in a
+//  synchronous orbit turns at the same rate as the body underneath it, so the
+//  error never sweeps and there is nothing to wait for - the phasing has to be
+//  solved in orbit, which is what rendezvous.ks is for.  A near-synchronous one
+//  has a window, but hours out.  Both are reported as what they are.
 // ---------------------------------------------------------------------------
-FUNCTION itcFindWindow {
-  LOCAL tStart IS ITC_TREF + ITC_MIN_LEAD.
-  LOCAL e0 IS itcWindowErrAt(tStart).
-  LOCAL tBest IS tStart.
-  LOCAL eBest IS ABS(e0).
-  LOCAL tPrev IS tStart.
-  LOCAL tNow  IS tStart + ITC_SCAN_STEP.
-  LOCAL found IS FALSE.
-  LOCAL tHit  IS tStart.
+FUNCTION itcSweepRate {             // deg of insertion phase per second of delay
+  LOCAL tA IS ITC_TREF + ITC_MIN_LEAD.
+  LOCAL dt IS 30.
+  LOCAL eA IS itcPhaseIfLaunchedAt(tA).
+  LOCAL eB IS itcPhaseIfLaunchedAt(tA + dt).
+  // Wrapped, so a baseline that happens to straddle +-180 does not read as a
+  // 360 deg per 30 s sweep.  Thirty seconds is unambiguous up to 6 deg/s, which
+  // is thirty times faster than anything in low orbit sweeps.
+  RETURN itcWrap(eB - eA) / dt.
+}
 
-  UNTIL found OR tNow > ITC_TREF + ITC_MAX_WAIT {
-    LOCAL e1 IS itcWindowErrAt(tNow).
-    IF ABS(e1) < eBest {
-      SET eBest TO ABS(e1).
+FUNCTION itcSweepAnalytic {         // what that rate has to be, from the periods
+  RETURN ITC_W_TGT - ITC_WSPIN.
+}
+
+FUNCTION itcBisectWindow {          // bisect a bracket known to hold a crossing
+  PARAMETER loIn, hiIn.
+  LOCAL lo IS loIn.
+  LOCAL hi IS hiIn.
+  FROM { LOCAL i IS 0. } UNTIL i >= ITC_BISECT STEP { SET i TO i + 1. } DO {
+    LOCAL mid IS (lo + hi) / 2.
+    IF itcWindowErrAt(lo) * itcWindowErrAt(mid) <= 0 {
+      SET hi TO mid.
+    } ELSE {
+      SET lo TO mid.
+    }
+  }
+  RETURN (lo + hi) / 2.
+}
+
+FUNCTION itcRefineWindow {          // hunt a crossing either side of a guess
+  PARAMETER tGuess, lapS.
+  LOCAL step IS MAX(1, lapS / 48).
+  LOCAL tPrev IS MAX(ITC_TREF + ITC_MIN_LEAD, tGuess - lapS / 4).
+  LOCAL ePrev IS itcWindowErrAt(tPrev).
+  LOCAL tNow IS tPrev + step.
+  LOCAL stop IS tGuess + lapS / 4.
+  UNTIL tNow > stop {
+    LOCAL eNow IS itcWindowErrAt(tNow).
+    IF ePrev * eNow < 0 AND ABS(eNow - ePrev) < 90 {
+      RETURN LIST(itcBisectWindow(tPrev, tNow), TRUE).
+    }
+    SET ePrev TO eNow.
+    SET tPrev TO tNow.
+    SET tNow TO tNow + step.
+  }
+  RETURN LIST(tGuess, FALSE).
+}
+
+FUNCTION itcScanWindow {            // the fallback: sweep the whole horizon
+  PARAMETER stepIn.
+  LOCAL step IS MAX(1, stepIn).
+  LOCAL tStart IS ITC_TREF + ITC_MIN_LEAD.
+  LOCAL ePrev IS itcWindowErrAt(tStart).
+  LOCAL tBest IS tStart.
+  LOCAL eBest IS ABS(ePrev).
+  LOCAL tPrev IS tStart.
+  LOCAL tNow IS tStart + step.
+  UNTIL tNow > ITC_TREF + ITC_MAX_WAIT {
+    LOCAL eNow IS itcWindowErrAt(tNow).
+    IF ABS(eNow) < eBest {
+      SET eBest TO ABS(eNow).
       SET tBest TO tNow.
     }
-    // A sign change with a small step in it is a real crossing.  A sign change
-    // with 300 degrees in it is the wrap, and bisecting that lands on the
-    // launch time that is *worst* - exactly half a lap from the one we want.
-    IF e0 * e1 < 0 AND ABS(e1 - e0) < 90 {
-      LOCAL lo IS tPrev.
-      LOCAL hi IS tNow.
-      FROM { LOCAL i IS 0. } UNTIL i >= ITC_BISECT STEP { SET i TO i + 1. } DO {
-        LOCAL mid IS (lo + hi) / 2.
-        IF itcWindowErrAt(lo) * itcWindowErrAt(mid) <= 0 {
-          SET hi TO mid.
-        } ELSE {
-          SET lo TO mid.
-        }
-      }
-      SET tHit TO (lo + hi) / 2.
-      SET found TO TRUE.
+    // A sign change with a small step in it is a crossing.  One with 300
+    // degrees in it is the wrap, and bisecting that lands on the launch time
+    // that is worst - exactly half a lap from the one we want.
+    IF ePrev * eNow < 0 AND ABS(eNow - ePrev) < 90 {
+      RETURN LIST(itcBisectWindow(tPrev, tNow), TRUE).
     }
-    SET e0 TO e1.
+    SET ePrev TO eNow.
     SET tPrev TO tNow.
-    SET tNow TO tNow + ITC_SCAN_STEP.
+    SET tNow TO tNow + step.
+  }
+  RETURN LIST(tBest, FALSE).
+}
+
+FUNCTION itcFindWindow {
+  SET ITC_SWEEP TO itcSweepRate().
+  SET ITC_LAP   TO 0.
+  LOCAL tStart IS ITC_TREF + ITC_MIN_LEAD.
+
+  IF ABS(ITC_SWEEP) > 0.000001 {
+    SET ITC_LAP TO ABS(360 / ITC_SWEEP).
+    LOCAL dtRoot IS -itcWindowErrAt(tStart) / ITC_SWEEP.
+    UNTIL dtRoot >= 0 { SET dtRoot TO dtRoot + ITC_LAP. }
+    IF dtRoot <= ITC_MAX_WAIT - ITC_MIN_LEAD {
+      LOCAL tRoot IS tStart + dtRoot.
+      IF ABS(itcWindowErrAt(tRoot)) <= ITC_WIN_TOL { RETURN LIST(tRoot, TRUE). }
+      // The closed form landed near it but not on it - an eccentric target, or
+      // a sweep that is not quite constant.  Hunt the crossing around the guess.
+      LOCAL fix IS itcRefineWindow(tRoot, ITC_LAP).
+      IF fix[1] { RETURN LIST(fix[0], TRUE). }
+    }
   }
 
-  IF found { RETURN LIST(tHit, TRUE). }
-  RETURN LIST(tBest, FALSE).
+  // No usable rate, or nothing to refine.  Sweep, with a step that cannot step
+  // over a crossing.
+  LOCAL step IS ITC_SCAN_STEP.
+  IF ITC_LAP > 0 { SET step TO MIN(step, ITC_LAP / 24). }
+  RETURN itcScanWindow(step).
 }
 
 // ---------------------------------------------------------------------------
@@ -576,6 +747,62 @@ FUNCTION itcPlaneAzimuth {          // heading that would match that plane, if a
   IF ABS(sinAz) > 1 { RETURN -999. }  // the site is nearer the pole than the
                                       // orbit ever gets; no heading reaches it
   RETURN ARCSIN(sinAz).
+}
+
+// ---------------------------------------------------------------------------
+//  What do the scripts we are about to call actually take?
+//
+//  This one is here because of a flight that got all the way to T-0 and then
+//  stopped with "Number of arguments passed in didn't match the number of
+//  DECLARE PARAMETERs" - after the countdown, on the runway, with the window
+//  spent.  The three scripts this one drives are ordinary files that people
+//  edit, replace with their own, and copy between saves, and a caller that
+//  assumes their signatures is a caller that fails at the worst possible
+//  moment.  kOS has no way to catch that error, so the only defence is to look
+//  first, and to look on the ground.
+//
+//  Program parameters are declared at the top of a file, before any function,
+//  so the search stops at the first FUNCTION.  Comments are not stripped -
+//  which is why the whole phrase "DECLARE PARAMETER" is required rather than
+//  the word on its own; prose about parameters is common, that exact statement
+//  in a comment is not.
+// ---------------------------------------------------------------------------
+FUNCTION itcFilePath {
+  PARAMETER pathIn.
+  IF EXISTS(pathIn + ".ks") { RETURN pathIn + ".ks". }
+  IF EXISTS(pathIn) { RETURN pathIn. }
+  RETURN "".
+}
+
+FUNCTION itcParamCount {
+  PARAMETER pathIn.
+  LOCAL fp IS itcFilePath(pathIn).
+  IF fp = "" { RETURN -1. }
+  LOCAL vf IS OPEN(fp).
+  IF NOT vf:HASSUFFIX("READALL") { RETURN -1. }
+  LOCAL cont IS vf:READALL.
+  IF NOT cont:HASSUFFIX("STRING") { RETURN -1. }
+  // Not "up": UP is a bound variable in kOS and declaring over it is an error
+  // the compiler is entirely right to make.
+  LOCAL txt IS cont:STRING:TOUPPER.
+  LOCAL cut IS txt:FIND("FUNCTION ").
+  IF cut > 0 { SET txt TO txt:SUBSTRING(0, cut). }
+
+  LOCAL total IS 0.
+  LOCAL at IS txt:FIND("DECLARE PARAMETER").
+  UNTIL at < 0 {
+    LOCAL from IS at + 17.
+    LOCAL rest IS txt:SUBSTRING(from, txt:LENGTH - from).
+    LOCAL stop IS rest:FIND(".").
+    IF stop < 0 { SET stop TO rest:LENGTH. }
+    // One statement may name several: `DECLARE PARAMETER a, b.`  A default of
+    // 0.5 puts a full stop inside the number and cuts the statement short,
+    // which loses nothing that is being counted.
+    SET total TO total + rest:SUBSTRING(0, stop):SPLIT(","):LENGTH.
+    SET txt TO rest.
+    SET at TO txt:FIND("DECLARE PARAMETER").
+  }
+  RETURN total.
 }
 
 // ---------------------------------------------------------------------------
@@ -851,6 +1078,16 @@ SET ITC_WAIT   TO 0.
 SET ITC_T_GO   TO ITC_T0.
 SET ITC_EXACT_WIN TO FALSE.
 SET ITC_DOCKED TO FALSE.
+SET ITC_SWEEP  TO 0.
+SET ITC_LAP    TO 0.
+SET ITC_TGT_R0 TO V(1, 0, 0).
+SET ITC_TGT_V0 TO V(0, 1, 0).
+SET ITC_H_TGT  TO V(0, 0, 1).
+SET ITC_H_HAT  TO V(0, 0, 1).
+SET ITC_W_TGT  TO 0.
+SET ITC_MODEL_GAP TO 0.
+SET ITC_TGT_ECC TO 0.
+SET ITC_ARGS_GUESSED TO FALSE.
 
 // --- 0a. Which vessel are we meeting? ---------------------------------------
 //  Same acquisition rules as rendezvous.ks, with one addition: if the map
@@ -968,20 +1205,55 @@ IF ITC_GO {
   }
 }
 
-// --- 0d. Are the scripts we are going to call actually here? ----------------
+// --- 0d. Are the scripts we are going to call here, and what do they take? --
 //  Cheap to check, and the alternative is finding out after the countdown.
 IF ITC_GO {
   SET ITC_MISSING TO "".
   FOR nm IN LIST(ITC_ASCENT, ITC_RENDEZ, ITC_DOCK) {
-    LOCAL p1 IS ITC_HOME + nm.
-    LOCAL p2 IS ITC_HOME + nm + ".ks".
-    IF NOT (EXISTS(p1) OR EXISTS(p2)) { SET ITC_MISSING TO ITC_MISSING + " " + nm. }
+    IF itcFilePath(ITC_HOME + nm) = "" { SET ITC_MISSING TO ITC_MISSING + " " + nm. }
   }
   IF ITC_MISSING <> "" {
     PRINT "!! Cannot find these scripts on """ + ITC_HOME + """:" + ITC_MISSING.
     PRINT "   Copy them alongside this one, or set ITC_HOME (e.g. ""0:/"").".
     SET ITC_GO TO FALSE.
     SET ITC_WHY TO "missing scripts".
+  }
+}
+
+IF ITC_GO AND ITC_CHECK_ARGS {
+  IF ITC_ASC_PARAMS  < 0 { SET ITC_ASC_PARAMS  TO itcParamCount(ITC_HOME + ITC_ASCENT). }
+  IF ITC_RDV_PARAMS  < 0 { SET ITC_RDV_PARAMS  TO itcParamCount(ITC_HOME + ITC_RENDEZ). }
+  IF ITC_DOCK_PARAMS < 0 { SET ITC_DOCK_PARAMS TO itcParamCount(ITC_HOME + ITC_DOCK). }
+  PRINT "Scripts: " + ITC_ASCENT + "(" + ITC_ASC_PARAMS + ")  " +
+        ITC_RENDEZ + "(" + ITC_RDV_PARAMS + ")  " +
+        ITC_DOCK + "(" + ITC_DOCK_PARAMS + ") parameters.".
+}
+
+IF ITC_GO {
+  // Anything that could not be read is assumed to be the version in this
+  // repository, which is the only assumption available - but it is an
+  // assumption, so it is printed rather than made silently.
+  IF ITC_ASC_PARAMS  < 0 { SET ITC_ASC_PARAMS  TO 1. SET ITC_ARGS_GUESSED TO TRUE. }
+  IF ITC_RDV_PARAMS  < 0 { SET ITC_RDV_PARAMS  TO 2. SET ITC_ARGS_GUESSED TO TRUE. }
+  IF ITC_DOCK_PARAMS < 0 { SET ITC_DOCK_PARAMS TO 2. SET ITC_ARGS_GUESSED TO TRUE. }
+  IF ITC_ARGS_GUESSED {
+    PRINT "Scripts: could not read their parameter lists - assuming the".
+    PRINT "  signatures this repository ships (1, 2, 2). If yours differ, set".
+    PRINT "  ITC_ASC_PARAMS / ITC_RDV_PARAMS / ITC_DOCK_PARAMS by hand.".
+  }
+
+  // An ascent script that takes no apoapsis cannot be sent to a parking orbit
+  // of our choosing, and the whole plan is built on choosing one.  It can still
+  // be flown - but only if we are told where it goes.
+  IF ITC_ASC_PARAMS = 0 AND ITC_PARK_FIXED <= 0 AND ITC_RUN_ASC {
+    PRINT "!! " + ITC_ASCENT + " declares no parameters, so it cannot be told".
+    PRINT "   which orbit to fly to - and the launch window is built around".
+    PRINT "   choosing one under the target.".
+    PRINT "   Either use the ascent.ks in this repository, which takes an".
+    PRINT "   apoapsis, or set ITC_PARK_FIXED to the altitude yours actually".
+    PRINT "   reaches (in metres) and the window will be planned around that.".
+    SET ITC_GO TO FALSE.
+    SET ITC_WHY TO "ascent script cannot be given a parking orbit".
   }
 }
 
@@ -1054,11 +1326,47 @@ IF ITC_GO {
 }
 
 IF ITC_GO {
+  // --- 1a'. Read the target, and decide how to predict it -------------------
+  //  Both models are evaluated a third of an orbit ahead and compared.  They
+  //  describe the same vessel with the same orbit, so they should agree to
+  //  within the eccentricity; a large disagreement means one of them is not
+  //  advancing, and a launch window built on a prediction that is not advancing
+  //  is a launch window half a day out that looks entirely reasonable.
+  itcTgtCapture().
+  SET ITC_MODEL_GAP TO itcTgtModelGap().
+  SET ITC_TGT_ECC   TO ITC_TGT:OBT:ECCENTRICITY.
+  IF ITC_TGT_MODEL = "auto" {
+    IF ITC_TGT_ECC <= ITC_ECC_CIRC {
+      // Circular, or near enough: the rotation is exact, and it is the only one
+      // of the two that cannot be wrong about the frame it is working in.
+      SET ITC_TGT_MODEL TO "rotate".
+    } ELSE IF ITC_MODEL_GAP <= 2 {
+      SET ITC_TGT_MODEL TO "posat".
+    } ELSE {
+      SET ITC_TGT_MODEL TO "rotate".
+      PRINT "!! " + ITC_TGT:NAME + " is on an eccentric orbit (e " +
+            ROUND(ITC_TGT_ECC, 3) + ") AND the two ways of".
+      PRINT "   predicting it disagree by " + ROUND(ITC_MODEL_GAP, 1) +
+            " deg. Using the circular one, which".
+      PRINT "   the eccentricity will cost accuracy - expect a longer phasing".
+      PRINT "   wait in orbit.".
+    }
+  }
+  PRINT "Target model: " + ITC_TGT_MODEL + "  (the two predictions differ by " +
+        ROUND(ITC_MODEL_GAP, 2) + " deg a third of an orbit out).".
+
   // --- 1b. The parking orbit, and the calibration for a climb to it ---------
   SET ITC_R_TGT   TO ITC_TGT:OBT:SEMIMAJORAXIS.
-  SET ITC_W_TGT   TO 360 / MAX(1, ITC_TGT:OBT:PERIOD).
   SET ITC_R_PARK  TO itcParkRadius(ITC_R_TGT).
   SET ITC_PARK_AP TO ITC_R_PARK - ITC_BODY_R.
+  IF ITC_PARK_FIXED > 0 AND ITC_ASC_PARAMS = 0 {
+    // An ascent script that cannot be told an apoapsis flies the one it flies;
+    // the plan has to be built around that rather than around a choice.
+    SET ITC_PARK_AP TO ITC_PARK_FIXED.
+    SET ITC_R_PARK  TO ITC_BODY_R + ITC_PARK_AP.
+    PRINT "Parking orbit fixed at " + ROUND(ITC_PARK_AP / 1000, 1) +
+          " km - the one your ascent script flies to.".
+  }
 
   IF ITC_PARK_AP > ITC_PARK_CEIL {
     PRINT "!! " + ITC_TGT:NAME + " is at " +
@@ -1091,9 +1399,8 @@ IF ITC_GO {
   SET ITC_WAIT  TO ITC_T_GO - TIME:SECONDS.
 
   // The plane, for information (see itcNextPlaneCross above for why it is only
-  // information).  Both vectors are read now; neither precesses in KSP.
-  SET ITC_H_TGT TO VCRS(itcRelPosAt(ITC_TGT, ITC_TREF), ITC_TGT:VELOCITY:ORBIT).
-  SET ITC_H_HAT TO ITC_H_TGT:NORMALIZED.
+  // information).  The normal came off the capture above; nothing precesses in
+  // KSP, so it is as good later as it is now.
   SET ITC_DI    TO VANG(ITC_H_TGT, ITC_KHAT).
   SET ITC_PLANE_DV TO 0.
   IF ITC_DI > ITC_PLANE_SKIP_DI {
@@ -1124,6 +1431,22 @@ IF ITC_GO {
         " deg/s  ->  a full lap of phase every " + itcHMS(ITC_SYNODIC).
   PRINT "  Aim       : insert with the target " + ROUND(ITC_PHASE_WANT, 1) +
         " deg ahead, then " + itcHMS(ITC_BUF) + " of drift to the transfer.".
+  SET ITC_SWEEP_WANT TO itcSweepAnalytic().
+  PRINT "  Sweep     : " + ROUND(ITC_SWEEP, 5) + " deg/s measured (" +
+        ROUND(ITC_SWEEP_WANT, 5) + " from the periods)  ->  a window every " +
+        itcHMS(ITC_LAP) + ".".
+  // The two numbers above are the same quantity computed two ways.  If they
+  // part company, the prediction the window was solved in is not the orbit the
+  // target is on, and the launch time is worthless - so it is said here, in
+  // front of the launch time, rather than left to be inferred from a rendezvous
+  // that goes wrong an hour later.
+  IF ABS(ITC_SWEEP_WANT) > 0.000001 AND
+     ABS(ITC_SWEEP - ITC_SWEEP_WANT) > ITC_SWEEP_TOL * ABS(ITC_SWEEP_WANT) {
+    PRINT "  !! Those two disagree. The predicted motion of the target is not".
+    PRINT "     the motion its orbital period implies, so the window below is".
+    PRINT "     not trustworthy. Set ITC_TGT_MODEL TO ""rotate"" and re-run,".
+    PRINT "     and see docs/INTERCEPT.md.".
+  }
 }
 
 IF ITC_GO {
@@ -1219,15 +1542,22 @@ IF ITC_GO {
 // ---------------------------------------------------------------------------
 //  2. THE COUNTDOWN
 // ---------------------------------------------------------------------------
-//  The checks above are not instantaneous - the window scan is a few thousand
-//  POSITIONAT calls at whatever instruction rate the processor is set to, and
-//  the plane warning deliberately holds.  If all of that has eaten the lead
-//  time, the window solved for is in the past, and launching anyway would be
-//  the exact mistake this script exists to prevent.  Solve the next one.
-IF ITC_GO {
+//  The checks above are not instantaneous - the plane warning deliberately
+//  holds, the parameter check reads three files, and the plane-crossing scan
+//  walks a whole rotation of the body.  If all of that has eaten the lead time,
+//  the window solved for is in the past, and launching anyway would be the
+//  exact mistake this script exists to prevent.  Solve the next one.
+SET ITC_WILL_FLY TO ITC_RUN_ASC OR ITC_RUN_RDV OR ITC_RUN_DOCK.
+IF ITC_GO AND NOT ITC_WILL_FLY {
+  PRINT "Rehearsal only - nothing will be flown, so nothing is waited for.".
+  SET ITC_WAIT TO 0.
+}
+
+IF ITC_GO AND ITC_WILL_FLY {
   IF TIME:SECONDS > ITC_T_GO - 10 {
     PRINT "The pre-flight took longer than the lead time. Re-solving.".
     itcRefresh().
+    itcTgtCapture().
     SET ITC_SOLN TO itcFindWindow().
     SET ITC_T_GO TO ITC_SOLN[0].
     SET ITC_EXACT_WIN TO ITC_SOLN[1].
@@ -1251,6 +1581,7 @@ IF ITC_GO AND ITC_WAIT > 0 {
   // the runway, and if the solver and the world still agree it should come out
   // at very nearly zero.
   itcRefresh().
+  itcTgtCapture().
   SET ITC_ERR_GO TO itcWindowErrAt(ITC_T_GO).
   PRINT "Countdown. Insertion error re-checked at T-" +
         ROUND(ITC_T_GO - TIME:SECONDS) + " s: " + ROUND(ITC_ERR_GO, 2) + " deg.".
@@ -1289,7 +1620,14 @@ IF ITC_GO AND ITC_RUN_ASC {
   SET ITC_LNG_LAUNCH TO SHIP:LONGITUDE.
   SET CONFIG:IPU TO ITC_IPU_SAVED.   // ascent.ks sets its own; give it the
                                      // value it expects to find and restore
-  RUNPATH(ITC_HOME + ITC_ASCENT, ITC_PARK_AP).
+  // Called the way it is written, not the way we would like it written.  kOS
+  // treats an argument count mismatch as a fatal error and there is no way to
+  // catch it, which on a launch script means the window is gone.
+  IF ITC_ASC_PARAMS >= 1 {
+    RUNPATH(ITC_HOME + ITC_ASCENT, ITC_PARK_AP).
+  } ELSE {
+    RUNPATH(ITC_HOME + ITC_ASCENT).
+  }
   SET CONFIG:IPU TO 800.
 
   // --- 4. Did it work, and what did it actually do? -------------------------
@@ -1307,6 +1645,7 @@ IF ITC_GO AND ITC_RUN_ASC {
     IF ITC_GROUND_ARC < 0 { SET ITC_GROUND_ARC TO ITC_GROUND_ARC + 360. }
     SET ITC_ARC_REAL TO ITC_GROUND_ARC + ITC_WSPIN * ITC_ASC_REAL.
     itcRefresh().                   // we are in orbit now; the basis moves with us
+    itcTgtCapture().
     SET ITC_OUR_VEC TO SHIP:POSITION - SHIP:BODY:POSITION.
     SET ITC_TGT_VEC TO ITC_TGT:POSITION - SHIP:BODY:POSITION.
     SET ITC_PHASE_REAL TO itcPhaseOf(ITC_OUR_VEC, ITC_TGT_VEC).
@@ -1351,7 +1690,13 @@ IF ITC_GO AND ITC_RUN_RDV {
   // than the one that was predicted on the runway.
   PRINT "Handing over to " + ITC_RENDEZ + ".".
   SET CONFIG:IPU TO ITC_IPU_SAVED.
-  RUNPATH(ITC_HOME + ITC_RENDEZ, "", parkMetres).
+  IF ITC_RDV_PARAMS >= 2 {
+    RUNPATH(ITC_HOME + ITC_RENDEZ, "", parkMetres).
+  } ELSE IF ITC_RDV_PARAMS = 1 {
+    RUNPATH(ITC_HOME + ITC_RENDEZ, "").
+  } ELSE {
+    RUNPATH(ITC_HOME + ITC_RENDEZ).
+  }
   SET CONFIG:IPU TO 800.
 
   SET ITC_RANGE TO (ITC_TGT:POSITION):MAG.
@@ -1438,7 +1783,13 @@ IF ITC_GO AND ITC_RUN_DOCK {
   SET ITC_PARTS_PRE TO SHIP:PARTS:LENGTH.
   PRINT "Handing over to " + ITC_DOCK + ".".
   SET CONFIG:IPU TO ITC_IPU_SAVED.
-  RUNPATH(ITC_HOME + ITC_DOCK, ourPortHint, 0).
+  IF ITC_DOCK_PARAMS >= 2 {
+    RUNPATH(ITC_HOME + ITC_DOCK, ourPortHint, 0).
+  } ELSE IF ITC_DOCK_PARAMS = 1 {
+    RUNPATH(ITC_HOME + ITC_DOCK, ourPortHint).
+  } ELSE {
+    RUNPATH(ITC_HOME + ITC_DOCK).
+  }
   SET CONFIG:IPU TO 800.
 }
 

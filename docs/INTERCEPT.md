@@ -80,6 +80,25 @@ running mean over the last few flights). The seeds in the script are only ever
 used once. The measured values are printed at the end whether the file could be
 written or not, so they can be typed in by hand.
 
+**The root is a division, not a search.** The error is a straight line in the
+launch time — our insertion point goes round at the body's rotation rate, the
+target at its own, and the difference between them is a constant. So the script
+measures that sweep rate over a 30-second baseline of the very function it is
+about to solve, and divides:
+
+```
+t_window = t_start - error(t_start) / sweep      brought forward a lap at a time
+```
+
+then **verifies** the answer (an eccentric target does not sweep quite
+uniformly) and refines it locally if it needs to. Only if that fails does it
+sweep the horizon, and then with a step capped at a 24th of a lap so it cannot
+step over a crossing.
+
+Measuring the rate rather than assuming it is what makes the cross-check in §6
+possible, and that check has already earned its place — see [What a flight
+found](#what-a-flight-found).
+
 **The window recurs quickly.** The phase error sweeps through 360° at the
 difference between the target's orbital rate and the body's rotation rate —
 about 0.17 °/s against a 100 km station on Kerbin. So:
@@ -252,6 +271,31 @@ normal** for one in flight. So the post-insertion phase is automatically
 measured in the plane the ship actually ended up in — the convention
 `rendezvous.ks` uses.
 
+### And the target is predicted two ways, which are checked against each other
+
+The same argument applies to the *target*, and this is where it stopped being
+theoretical. There are two ways to say where a station will be in twenty
+minutes:
+
+* **`POSITIONAT`** — kOS's own prediction. Exact for any orbit, eccentric ones
+  included, and the idiom `POSITIONAT(x, t) - POSITIONAT(BODY, t)` is what
+  `rendezvous.ks` uses. But it is built on kOS's frame handling, and this script
+  asks it from a *landed* ship, which is the one situation where the frame is
+  not the inertial one.
+* **Rotation** — take the target's position and orbit normal now, and rotate the
+  one about the other at its own orbital rate. Exact for a circular orbit,
+  needs no frame assumption whatsoever, and is the same construction the launch
+  site gets.
+
+Both are evaluated a third of an orbit ahead and compared. For a near-circular
+target the rotation is used (it is exact, and it cannot be wrong about a frame);
+for an eccentric one `POSITIONAT` is used if the two agree. The disagreement is
+printed either way, and a second, independent guard sits behind it: the
+**measured** sweep rate is printed next to the rate the two orbital periods say
+it must be. Those are the same number computed two ways, and if they part
+company the launch time is worthless — which is a thing to say in front of the
+launch time, not to be inferred from a rendezvous that goes wrong an hour later.
+
 The ascent arc is measured a third way again, and deliberately: **in longitudes,
 not vectors.** It has to be measured across twenty minutes of flight, during
 which KSP switches from the rotating frame to the inertial one, so the two ends
@@ -271,6 +315,7 @@ countdown:
 | Relative inclination ≤ 90° | A retrograde target is unreachable from an eastward runway launch |
 | The ship is **landed or pre-launch, and stopped** | The launch site is measured off a stationary ship; a ship already in orbit wants `rendezvous.ks`, and is told so |
 | `ascent`, `rendezvous` and `dock` are all present on the volume | Finding out after the countdown is the whole thing we are avoiding |
+| ...and **how many parameters each of them declares** | See [What a flight found](#what-a-flight-found). kOS treats an argument-count mismatch as a fatal error and gives no way to catch it, so the three scripts are read on the ground and called the way they are actually written |
 | A **free docking port** aboard, RCS blocks fitted, monopropellant over a floor | You cannot dock without them, and all three are trivially fixable on the ground and impossible to fix in orbit |
 | The parking orbit is inside `ITC_PARK_CEIL` | Past that the ascent is the problem, not the window |
 
@@ -325,6 +370,57 @@ to. The IPU is restored from our own saved copy.
 
 ---
 
+## What a flight found
+
+The first real flight of this script, against a station at 108 × 110 km over
+Kerbin, produced two failures. Both are fixed; both are worth writing down,
+because both were invisible to a static check and to the simulation.
+
+**1. It waited five and a half hours for a window that should have been
+minutes away.** The report was internally consistent — the plan, the buffer, the
+aim point and the predicted insertion phase all agreed with each other — and
+completely wrong. Against a 108 km target the window recurs every **36
+minutes**; the script announced one **5:32:15** out.
+
+Reconstructing it: 5:32 is one Kerbin day minus the initial phase error divided
+by Kerbin's *rotation* rate. In other words the only thing sweeping in that
+solve was the runway turning underneath a target that was not moving — the
+target's predicted position was not advancing with time. That inference comes
+from the reported numbers rather than from a debugger, and the cause inside kOS
+was not chased further; what is certain is that this script is the only one in
+the repository that asks `POSITIONAT` for a prediction **from a landed ship**,
+which is the one situation where the world frame is turning with the body.
+`rendezvous.ks` asks the same question from orbit, where it is not.
+
+The old solver could not notice. It scanned for a sign change with a fixed
+20-second step and reported whatever it found, so a prediction that had stopped
+moving looked exactly like a prediction that was moving slowly. The rewrite
+makes the sweep rate an explicit, measured quantity, prints it next to the value
+the two orbital periods demand, and predicts the target by rotation rather than
+by `POSITIONAT` whenever the orbit is near-circular — which removes the
+dependency entirely for the case that matters. Both numbers are on screen before
+the countdown starts. Reproducing the fault in the propagation confirms the
+signature exactly: sweep −0.01671 °/s against an expected +0.16404, "a window
+every 5.99 h", launch time hours out.
+
+**2. It reached T-0 and stopped with an argument-count error.** The install's
+`ascent.ks` did not declare a parameter, `RUNPATH(..., ITC_PARK_AP)` passed one,
+and kOS treats that as fatal — after the wait, on the runway, with the window
+spent. kOS gives no way to catch it, so the script now *reads* the three scripts
+it is going to call, counts the `DECLARE PARAMETER` statements in each, and
+calls them the way they are actually written. An ascent script that takes no
+apoapsis cannot be sent to a parking orbit of our choosing, so that is refused
+on the ground with the fix spelled out: use the `ascent.ks` in this repository,
+or set `ITC_PARK_FIXED` to the altitude yours reaches and the window is planned
+around that instead.
+
+The general lesson is the one the rest of this repository keeps learning: a
+number that is only ever computed one way cannot be checked, and a handover that
+assumes the far side's signature is a handover that fails at the worst possible
+moment. Both fixes are cross-checks, not corrections.
+
+---
+
 ## Verification
 
 The script cannot be run outside KSP, so the part of it that is pure arithmetic
@@ -345,6 +441,15 @@ lap out, which is the most expensive mistake a script like this can make, and it
 looks completely plausible until the ship gets there. A separate counter watched
 for waits longer than three quarters of a synodic period — where a sign error
 would put *every* case — and found none in 1200 flights.
+
+**The solver.** The closed-form solution was checked over 300 randomised
+geometries (seven target altitudes, three inclinations, eccentricities to 0.02),
+under both prediction models: every case returns a launch time whose insertion
+phase error is **under 0.05°**, which is the tolerance it verifies against, and
+none falls back to the horizon scan. Fed a deliberately broken prediction — a
+target that does not advance — the sweep cross-check reports −0.0167 °/s against
+an expected +0.164 °/s, which is the failure described above and is now printed
+rather than flown.
 
 **Ascent scatter.** With the ascent time scattered by ±2 minutes and the arc by
 ±12° (a calibrated ascent), over 600 randomised geometries: median drift left to
@@ -384,6 +489,9 @@ prints everything needed to judge it. In order of how often you will touch them:
 | `ITC_RDV_RANGE_OK` | How close counts as a finished rendezvous | Docking is refused after a rendezvous that actually went fine |
 | `ITC_MONO_DOCK` | Pre-launch monopropellant floor | Launches refused on a ship that had enough |
 | `ITC_HOME` | Where the other three scripts live | "Cannot find these scripts" — set it to `"0:/"` |
+| `ITC_TGT_MODEL` | How the target's future position is predicted: `"rotate"`, `"posat"` or `"auto"` | The two models disagree, or the measured sweep does not match the periods. `"rotate"` is the safe answer for any station |
+| `ITC_PARK_FIXED` | The parking altitude, when your ascent script cannot be told one | The script refuses to launch because `ascent` declares no parameters |
+| `ITC_ASC_PARAMS` / `ITC_RDV_PARAMS` / `ITC_DOCK_PARAMS` | Parameter counts, if they cannot be read from the files | "could not read their parameter lists" in the pre-flight, and your scripts do not take (1, 2, 2) |
 
 `ITC_RUN_ASC`, `ITC_RUN_RDV` and `ITC_RUN_DOCK` can each be set `FALSE` to
 rehearse the window solver and the pre-flight checks without flying anything —
