@@ -19,7 +19,7 @@ other brings it home and lands it back on the runway.
 | Payload up to **100 t** | Closes to 100 km LKO at 365 t launch mass with ~660 m/s ΔV to spare (see [DESIGN](docs/DESIGN.md)) |
 | Bay fits **3 stacked Jumbo-64** | Two **CRG-100** bays back to back = **20 m** of clear 3.75 m bay (a Jumbo-64 is ≈ 3.75 m tall, so 3 stack easily) |
 | **≥ 4 crew** | Mk3 Cockpit (4 Kerbals) |
-| **Shielded docking port** to dock a station | `Clamp-O-Tron Shielded Docking Port` on the dorsal spine |
+| **Shielded docking port** to dock a station | `Clamp-O-Tron Shielded Docking Port` on the dorsal spine + `dock.ks` guidance script |
 | Reaction wheels | Mk3 cockpit torque + `Advanced Reaction Wheel Module, Large` |
 | RTGs, batteries | 4 × `PB-NUK RTG`, 2 × `Z-4K` battery banks |
 | Comms | `Communotron 88-88` relay dish + 2 × `Communotron 16` |
@@ -39,6 +39,7 @@ other brings it home and lands it back on the runway.
 craft/Mk3_Titan_SSTO.craft   The spaceplane (drop into your KSP save)
 scripts/ascent.ks            Runway -> orbit autopilot, ΔV-budgeting (kOS)
 scripts/rendezvous.ks        Orbit -> park alongside a station or vessel (kOS)
+scripts/dock.ks              Alongside -> port-to-port hard dock (kOS)
 scripts/deorbit_land.ks      Deorbit -> reentry -> runway landing autopilot (kOS)
 tools/build_craft.py         Procedural generator that produced the .craft
 tools/check_kos.py           Static checker for the .ks scripts - run before flying
@@ -46,6 +47,7 @@ docs/BUILD_GUIDE.md          Part-by-part manifest + manual rebuild instructions
 docs/FLIGHT_MANUAL.md        Action groups + how to fly it (auto or by hand)
 docs/DESIGN.md               Mass & ΔV budget, ascent profile, design rationale
 docs/RENDEZVOUS.md           How the rendezvous is planned, flown and verified
+docs/DOCKING.md              How the docking approach is routed, flown and verified
 docs/*_REVIEW.md             Flight-data reviews - where the tuned constants came from
 ```
 
@@ -77,7 +79,8 @@ Then open the **SPH** (Space Plane Hangar) and load *Mk3 Titan Heavy SSTO*.
 **2. The kOS scripts** — copy them onto the kOS *Archive* volume:
 
 ```
-cp scripts/ascent.ks scripts/rendezvous.ks scripts/deorbit_land.ks  "<KSP>/Ships/Script/"
+cp scripts/ascent.ks scripts/rendezvous.ks scripts/dock.ks scripts/deorbit_land.ks \
+   "<KSP>/Ships/Script/"
 ```
 
 (`Ships/Script/` is kOS's archive folder — it's the `0:` volume in the terminal.)
@@ -123,13 +126,35 @@ cp scripts/ascent.ks scripts/rendezvous.ks scripts/deorbit_land.ks  "<KSP>/Ships
    transfers, corrects, kills the relative velocity, and parks a few hundred
    metres off the target at a closing speed it can actually stop from. It does
    not dock — see [`docs/RENDEZVOUS.md`](docs/RENDEZVOUS.md).
-5. Do your mission (dock via the dorsal shielded port, drop cargo, etc.).
-6. Come home:
+5. Dock:
+   ```
+   RUN dock.               // both ports as they are set up in the game
+   RUN dock("dorsal").     // or name our port, by part tag or title
+   ```
+   First, in the game: **target the port** you want to dock with (right-click it
+   → Set as Target — the port, not the vessel) and **control from your own port**
+   (right-click → Control From Here). Neither ship has to be pointing anywhere
+   in particular; the script assumes they are not.
+
+   It identifies both ports and refuses to guess between two of its own, opens
+   its shield if it has one, measures both craft to draw a **keep-out sphere**
+   from their actual part trees, and prices the whole approach in
+   monopropellant. Then it routes to a standoff point on the target port's axis
+   — out, forward, in, never *through* the station — matches the port axes,
+   and closes down the corridor inside a **cone that narrows with the range
+   left**, with the axial rate held at zero whenever it is off-axis or
+   misaligned. Inside the port's acquire range it stops thrusting and lets the
+   magnets do the last half metre; if they do not bite it backs off and re-flies
+   the approach. The closing speed is capped at what the RCS can actually stop
+   from, and an arrival it *cannot* stop is refused before it starts rather than
+   discovered at two metres. See [`docs/DOCKING.md`](docs/DOCKING.md).
+6. Do your mission (transfer crew and fuel, drop cargo, etc.).
+7. Come home:
    ```
    RUN deorbit_land.
    ```
    It plans and burns the deorbit, flies a high-AoA reentry, glides to the KSC,
-   and lands on the runway.
+   and lands on the runway. Undock and back off clear of the station first.
 
 > **Read [`docs/FLIGHT_MANUAL.md`](docs/FLIGHT_MANUAL.md) before the first
 > flight** for the action-group setup and the manual-flight procedure.
