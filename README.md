@@ -1,9 +1,11 @@
 # Mk3 "Titan" Heavy-Lift SSTO
 
 A stock-parts **single-stage-to-orbit spaceplane** for Kerbal Space Program
-**1.2.x**, built around the Mk3 fuselage system, plus the two **kOS** flight
-scripts that fly it: one takes it from the KSC runway to a 100 km orbit, the
-other brings it home and lands it back on the runway.
+**1.2.x**, built around the Mk3 fuselage system, plus the **kOS** flight scripts
+that fly it: from the KSC runway to orbit, out to a station and onto its docking
+port, and home again to land on the runway — either one stage at a time, or the
+whole mission from a single command that waits on the runway for the right
+minute to go.
 
 ![class](https://img.shields.io/badge/class-SSTO%20spaceplane-blue)
 ![game](https://img.shields.io/badge/KSP-1.2.x-green)
@@ -37,6 +39,8 @@ other brings it home and lands it back on the runway.
 
 ```
 craft/Mk3_Titan_SSTO.craft   The spaceplane (drop into your KSP save)
+scripts/intercept.ks         Runway -> hard dock: waits for the launch window,
+                             then runs the three scripts below in order (kOS)
 scripts/ascent.ks            Runway -> orbit autopilot, ΔV-budgeting (kOS)
 scripts/rendezvous.ks        Orbit -> park alongside a station or vessel (kOS)
 scripts/dock.ks              Alongside -> port-to-port hard dock (kOS)
@@ -48,6 +52,7 @@ docs/FLIGHT_MANUAL.md        Action groups + how to fly it (auto or by hand)
 docs/DESIGN.md               Mass & ΔV budget, ascent profile, design rationale
 docs/RENDEZVOUS.md           How the rendezvous is planned, flown and verified
 docs/DOCKING.md              How the docking approach is routed, flown and verified
+docs/INTERCEPT.md            How the launch window is solved, and what it cannot do
 docs/*_REVIEW.md             Flight-data reviews - where the tuned constants came from
 ```
 
@@ -79,8 +84,8 @@ Then open the **SPH** (Space Plane Hangar) and load *Mk3 Titan Heavy SSTO*.
 **2. The kOS scripts** — copy them onto the kOS *Archive* volume:
 
 ```
-cp scripts/ascent.ks scripts/rendezvous.ks scripts/dock.ks scripts/deorbit_land.ks \
-   "<KSP>/Ships/Script/"
+cp scripts/intercept.ks scripts/ascent.ks scripts/rendezvous.ks scripts/dock.ks \
+   scripts/deorbit_land.ks "<KSP>/Ships/Script/"
 ```
 
 (`Ships/Script/` is kOS's archive folder — it's the `0:` volume in the terminal.)
@@ -92,7 +97,31 @@ cp scripts/ascent.ks scripts/rendezvous.ks scripts/dock.ks scripts/deorbit_land.
 1. Load the craft in the SPH, put ≤ 100 t of cargo in the bays, roll to the
    runway.
 2. Right-click the **kOS processor** → **Open Terminal**.
-3. Fly to orbit:
+3. **The whole mission, in one command.** Select the station on the map (or the
+   docking port you want to use), and:
+   ```
+   RUN intercept.                    // whatever is selected on the map
+   RUN intercept("Station Alpha").   // or by name - a substring is enough
+   ```
+   It checks everything that can be checked on the ground — the target, the
+   scripts, a free port, RCS, monopropellant — chooses a parking orbit under the
+   station, works out the launch time that puts the ship in the right place
+   relative to it *at orbital insertion*, and then **waits on the runway** for
+   it under time warp. At T-0 it hands over to the three scripts below in turn,
+   checking between each that the last one actually finished, measures what the
+   ascent really did and writes it back to disk so the next launch window is
+   aimed better than this one.
+
+   Waiting is worth it: launching whenever the command happens to be typed
+   leaves the transfer point already behind the ship **54 %** of the time, and
+   that is paid for with a phasing orbit. See [`docs/INTERCEPT.md`](docs/INTERCEPT.md)
+   for what it solves, and for the one thing it deliberately does not — a
+   runway launch always goes due east, so an inclined target's plane change is a
+   bill, not a window, and the script prices it before the countdown rather than
+   after the climb.
+
+   The stages below are the same scripts, run by hand.
+4. Fly to orbit:
    ```
    RUN ascent.             // 100 km, the default
    RUN ascent(150000).     // or any apoapsis, in metres
@@ -113,7 +142,7 @@ cp scripts/ascent.ks scripts/rendezvous.ks scripts/dock.ks scripts/deorbit_land.
    The script is generic: it flies any RAPIER spaceplane capable of reaching
    orbit, not just this one. See the [flight manual](docs/FLIGHT_MANUAL.md) for
    how it picks its profile and what to trim if a flight comes up short.
-4. Meet your station:
+5. Meet your station:
    ```
    RUN rendezvous.                   // whatever is selected on the map
    RUN rendezvous("Station Alpha").  // or by name - a substring is enough
@@ -126,7 +155,7 @@ cp scripts/ascent.ks scripts/rendezvous.ks scripts/dock.ks scripts/deorbit_land.
    transfers, corrects, kills the relative velocity, and parks a few hundred
    metres off the target at a closing speed it can actually stop from. It does
    not dock — see [`docs/RENDEZVOUS.md`](docs/RENDEZVOUS.md).
-5. Dock:
+6. Dock:
    ```
    RUN dock.               // both ports as they are set up in the game
    RUN dock("dorsal").     // or name our port, by part tag or title
@@ -148,8 +177,8 @@ cp scripts/ascent.ks scripts/rendezvous.ks scripts/dock.ks scripts/deorbit_land.
    the approach. The closing speed is capped at what the RCS can actually stop
    from, and an arrival it *cannot* stop is refused before it starts rather than
    discovered at two metres. See [`docs/DOCKING.md`](docs/DOCKING.md).
-6. Do your mission (transfer crew and fuel, drop cargo, etc.).
-7. Come home:
+7. Do your mission (transfer crew and fuel, drop cargo, etc.).
+8. Come home:
    ```
    RUN deorbit_land.
    ```
