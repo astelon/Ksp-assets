@@ -161,6 +161,13 @@ Inside the port's own acquire range — read off the part, not guessed — the
 thrusters stop commanding anything but a creep and the ship coasts. The magnets
 are stronger and better aimed than RCS is at that distance.
 
+> Reading that range is where the first real flight stopped. kOS renamed the
+> suffix at 0.18 and keeps the old spelling registered purely to complain about
+> it, so `HASSUFFIX("AQUIRERANGE")` says yes on a current install and reading it
+> throws. The current name is asked for first now, and the old one only where
+> the current one is genuinely missing. If neither answers, `CAPTURE_MIN`
+> stands in.
+
 If they do not bite within `CAPTURE_WAIT`, the script backs off to the standoff
 and re-flies the approach rather than pushing harder, up to `CAPTURE_TRIES`
 times. Pushing harder into a port that is not latching is how two ships end up
