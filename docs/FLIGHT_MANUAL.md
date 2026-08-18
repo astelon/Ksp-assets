@@ -26,6 +26,62 @@ but Group 1 is a handy manual override.
 
 ## Auto flight (kOS)
 
+### The whole mission, in one command
+
+```
+RUN intercept.                          // whatever is selected on the map
+RUN intercept("Station Alpha").         // or by name - a substring is enough
+RUN intercept("Alpha", 250).            // ...and a park distance, in metres
+RUN intercept("Alpha", 200, "dorsal").  // ...and which of our ports is ours
+```
+
+Sit on the runway, select the station on the map — or the **docking port** you
+want, which is better, because then that berth is used all the way through —
+and run it. It waits for the launch window and then flies the ascent, the
+rendezvous and the docking in order, checking between each that the last one
+actually finished.
+
+Sequence: acquire and validate the target → check the ship, its ports, its RCS
+and mono, and that the other three scripts are on the volume → choose a parking
+orbit under the station → solve the launch time → print the plan and the plane
+bill → warp the wait out on the runway → `ascent.ks` → measure what the climb
+really did and write it back to disk → `rendezvous.ks` → pick a free berth on
+the station → `dock.ks` → report.
+
+The part worth understanding before you run it: **it is aiming at where the
+target will be when the ship *arrives* in orbit**, about twenty minutes after
+the brakes come off, not at where it is now. That prediction needs to know how
+long the climb takes and how far round Kerbin it gets, and those two numbers are
+*measured on every flight* and stored in `0:/intercept_cal.json`, keyed by body
+and parking altitude. The first flight to a given orbit uses a seed and will be
+the worst one; the report prints the error and the correction it has just
+saved.
+
+Three things to expect:
+
+* **It parks under the station, not level with it** — 25 km under by default,
+  and above it instead if the station is too low to get under. Two orbits at
+  the same altitude have no period difference, so the phase you arrive with is
+  the phase you keep and the launch time would have to be perfect. The gap is
+  what turns a mis-timed launch into a short wait instead of a phasing orbit.
+* **It aims deliberately early**, leaving itself drift to spend — usually
+  around an hour of it — because arriving early costs time and arriving late
+  costs a synodic lap. That drift is not wasted: it is exactly the wait
+  `rendezvous.ks`'s phasing solver is designed to warp through, and if the
+  window did its job "just stay here" is the plan it picks, at zero ΔV.
+* **It cannot wait for a plane window, and says so.** The runway points east and
+  `ascent.ks` flies that heading, so the ship reaches an equatorial orbit
+  whenever it launches, and an inclined target's plane change costs the same
+  regardless. It prints that bill *before* the countdown (10° of inclination is
+  about 390 m/s), holds so you can read it, and refuses outright if the target
+  is retrograde.
+
+If anything fails a pre-flight check the ship never moves, and the reason is
+printed. `ITC_RUN_ASC`, `ITC_RUN_RDV` and `ITC_RUN_DOCK` can each be set `FALSE`
+inside the script to rehearse the window solver and the checks without flying
+anything. See [`docs/INTERCEPT.md`](INTERCEPT.md) for the derivation, the
+tunables, and how the geometry was verified outside the game.
+
 ### To orbit
 
 ```
