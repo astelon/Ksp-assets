@@ -265,15 +265,15 @@ SET CONFIG:IPU TO 1000.
 //  are words you would reach for while writing a rendezvous.  Run
 //  `tools/check_kos.py` after editing; it checks before the game does.
 
-// Clamp `valIn` into [loV, hiV].  Note the argument order differs from the
-// clampVal in deorbit_land.ks - that one takes (lo, hi, value).  Keep them
+// Clamp `valIn` into [loV, hiV].  Note the argument order differs from
+// dlClampVal in deorbit_land.ks - that one takes (lo, hi, value).  Keep them
 // straight when copying a line between the two files.
-FUNCTION clampVal {
+FUNCTION rdvClampVal {
   PARAMETER valIn, loV, hiV.
   RETURN MAX(loV, MIN(hiV, valIn)).
 }
 
-FUNCTION normAng {                  // wrap an angle into (-180, 180]
+FUNCTION rdvNormAng {                  // wrap an angle into (-180, 180]
   PARAMETER angIn.
   LOCAL ang IS angIn.
   UNTIL ang <= 180 { SET ang TO ang - 360. }
@@ -291,7 +291,7 @@ FUNCTION normAng {                  // wrap an angle into (-180, 180]
 //  walk the part tree outward from the engines and refuse to cross anything
 //  that can separate.  Whatever we reach is the ship; the rest is payload.
 // ---------------------------------------------------------------------------
-FUNCTION isSeparator {
+FUNCTION rdvIsSeparator {
   PARAMETER prt.
   FOR mname IN prt:MODULES {
     LOCAL low IS mname:TOLOWER.
@@ -303,7 +303,7 @@ FUNCTION isSeparator {
   RETURN FALSE.
 }
 
-FUNCTION mapFeedNetwork {
+FUNCTION rdvMapFeedNetwork {
   LOCAL seen    IS LEXICON().
   LOCAL pending IS LIST().
   LOCAL engs    IS LIST().
@@ -315,7 +315,7 @@ FUNCTION mapFeedNetwork {
   UNTIL idx >= pending:LENGTH {
     LOCAL prt IS pending[idx].
     SET idx TO idx + 1.
-    IF NOT isSeparator(prt) {
+    IF NOT rdvIsSeparator(prt) {
       LOCAL nbrs IS LIST().
       IF prt:HASPARENT { nbrs:ADD(prt:PARENT). }
       FOR kid IN prt:CHILDREN { nbrs:ADD(kid). }
@@ -327,7 +327,7 @@ FUNCTION mapFeedNetwork {
   RETURN seen.
 }
 
-SET CORE_UIDS  TO mapFeedNetwork().
+SET CORE_UIDS  TO rdvMapFeedNetwork().
 SET CORE_TANKS TO LIST().           // our tanks - the only ones counted as dV
 SET PAY_TANKS  TO LIST().           // payload tanks - counted, then locked out
 SET SEPARATORS TO LIST().
@@ -344,14 +344,14 @@ FOR prt IN SHIP:PARTS {
   }
   IF CORE_UIDS:HASKEY(prt:UID) {
     IF holds { CORE_TANKS:ADD(prt). }
-    IF isSeparator(prt) { SEPARATORS:ADD(prt). }
+    IF rdvIsSeparator(prt) { SEPARATORS:ADD(prt). }
   } ELSE {
     SET payloadMass TO payloadMass + prt:MASS.
     IF holds { PAY_TANKS:ADD(prt). }
   }
 }
 
-FUNCTION coreResAmt {               // amount inside the engines' feed network
+FUNCTION rdvCoreResAmt {               // amount inside the engines' feed network
   PARAMETER rname.
   LOCAL total IS 0.
   FOR prt IN CORE_TANKS {
@@ -362,7 +362,7 @@ FUNCTION coreResAmt {               // amount inside the engines' feed network
   RETURN total.
 }
 
-FUNCTION listResAmt {               // same, over an arbitrary part list
+FUNCTION rdvListResAmt {               // same, over an arbitrary part list
   PARAMETER prts, rname.
   LOCAL total IS 0.
   FOR prt IN prts {
@@ -373,7 +373,7 @@ FUNCTION listResAmt {               // same, over an arbitrary part list
   RETURN total.
 }
 
-FUNCTION resAmtShip {               // whole-ship total
+FUNCTION rdvResAmtShip {               // whole-ship total
   PARAMETER rname.
   LOCAL total IS 0.
   FOR res IN SHIP:RESOURCES {
@@ -382,7 +382,7 @@ FUNCTION resAmtShip {               // whole-ship total
   RETURN total.
 }
 
-FUNCTION resDensity {               // tonnes per unit
+FUNCTION rdvResDensity {               // tonnes per unit
   PARAMETER rname, fallback.
   FOR res IN SHIP:RESOURCES {
     IF res:NAME = rname AND res:DENSITY > 0 { RETURN res:DENSITY. }
@@ -390,11 +390,11 @@ FUNCTION resDensity {               // tonnes per unit
   RETURN fallback.
 }
 
-SET LF_DENS   TO resDensity("LiquidFuel", 0.005).
-SET OX_DENS   TO resDensity("Oxidizer", 0.005).
-SET MONO_DENS TO resDensity("MonoPropellant", 0.004).
+SET LF_DENS   TO rdvResDensity("LiquidFuel", 0.005).
+SET OX_DENS   TO rdvResDensity("Oxidizer", 0.005).
+SET MONO_DENS TO rdvResDensity("MonoPropellant", 0.004).
 
-FUNCTION blockCrossfeed {
+FUNCTION rdvBlockCrossfeed {
   LOCAL blocked IS 0.
   FOR prt IN SEPARATORS {
     FOR mname IN prt:MODULES {
@@ -408,7 +408,7 @@ FUNCTION blockCrossfeed {
   RETURN blocked.
 }
 
-FUNCTION lockPayloadTanks {
+FUNCTION rdvLockPayloadTanks {
   LOCAL locked IS 0.
   FOR prt IN PAY_TANKS {
     FOR res IN prt:RESOURCES {
@@ -424,7 +424,7 @@ FUNCTION lockPayloadTanks {
 // ---------------------------------------------------------------------------
 //  Ship measurement
 // ---------------------------------------------------------------------------
-FUNCTION measureRocketIsp {
+FUNCTION rdvMeasureRocketIsp {
   LOCAL engs IS LIST().
   LIST ENGINES IN engs.
   LOCAL wsum IS 0.
@@ -444,7 +444,7 @@ FUNCTION measureRocketIsp {
 // Force every multimode engine into closed cycle.  In vacuum the air-breathing
 // mode reports no thrust at all, which would poison every burn-time estimate
 // below and leave the ship sitting at full throttle going nowhere.
-FUNCTION goClosedCycle {
+FUNCTION rdvGoClosedCycle {
   LOCAL engs IS LIST().
   LIST ENGINES IN engs.
   FOR eng IN engs {
@@ -457,17 +457,17 @@ FUNCTION goClosedCycle {
 
 // Propellant the closed-cycle engines can actually burn: our LF and Ox only,
 // and only in 9:11 pairs, so a lopsided tank state is not counted as dV.
-FUNCTION rocketPropMass {
-  LOCAL lfAmt IS coreResAmt("LiquidFuel").
-  LOCAL oxAmt IS coreResAmt("Oxidizer").
+FUNCTION rdvRocketPropMass {
+  LOCAL lfAmt IS rdvCoreResAmt("LiquidFuel").
+  LOCAL oxAmt IS rdvCoreResAmt("Oxidizer").
   LOCAL lfUse IS MIN(lfAmt, oxAmt * LFO_LF_RATIO / LFO_OX_RATIO).
   LOCAL oxUse IS lfUse * LFO_OX_RATIO / LFO_LF_RATIO.
   RETURN lfUse * LF_DENS + oxUse * OX_DENS.
 }
 
-FUNCTION rocketDv {                 // remaining closed-cycle dV (m/s)
+FUNCTION rdvRocketDv {                 // remaining closed-cycle dV (m/s)
   LOCAL m0 IS SHIP:MASS.
-  LOCAL m1 IS m0 - rocketPropMass().
+  LOCAL m1 IS m0 - rdvRocketPropMass().
   IF m0 <= 0 OR m1 <= 0 OR m1 >= m0 { RETURN 0. }
   RETURN RKT_ISP * G0 * LN(m0 / m1).
 }
@@ -475,9 +475,9 @@ FUNCTION rocketDv {                 // remaining closed-cycle dV (m/s)
 // The monopropellant aboard, as dV.  This is a second, separate currency: the
 // terminal approach is flown on RCS, and running the mono dry a hundred metres
 // off a station leaves the ship drifting with no way to stop.
-FUNCTION monoDv {
+FUNCTION rdvMonoDv {
   LOCAL m0 IS SHIP:MASS.
-  LOCAL m1 IS m0 - resAmtShip("MonoPropellant") * MONO_DENS.
+  LOCAL m1 IS m0 - rdvResAmtShip("MonoPropellant") * MONO_DENS.
   IF m0 <= 0 OR m1 <= 0 OR m1 >= m0 { RETURN 0. }
   RETURN RCS_ISP_FALLBACK * G0 * LN(m0 / m1).
 }
@@ -487,7 +487,7 @@ FUNCTION monoDv {
 // decision about whether the approach can be flown must be taken on what is
 // left above it and not on what the gauge reads.
 FUNCTION monoDvUsable {
-  LOCAL amt IS MAX(0, resAmtShip("MonoPropellant") - MONO_RESERVE).
+  LOCAL amt IS MAX(0, rdvResAmtShip("MonoPropellant") - MONO_RESERVE).
   LOCAL m0  IS SHIP:MASS.
   LOCAL m1  IS m0 - amt * MONO_DENS.
   IF m0 <= 0 OR m1 <= 0 OR m1 >= m0 { RETURN 0. }
@@ -499,10 +499,10 @@ FUNCTION monoDvUsable {
 // gauge readings, because the gauge includes the ride home.
 FUNCTION rocketDvUsable {
   PARAMETER floorDv.
-  RETURN MAX(0, rocketDv() - floorDv).
+  RETURN MAX(0, rdvRocketDv() - floorDv).
 }
 
-FUNCTION burnTimeFor {              // seconds to spend dvNeed at full throttle
+FUNCTION rdvBurnTimeFor {              // seconds to spend dvNeed at full throttle
   PARAMETER dvNeed.
   LOCAL thr IS SHIP:AVAILABLETHRUST.
   IF thr <= 0 OR dvNeed <= 0 { RETURN 0. }
@@ -513,15 +513,15 @@ FUNCTION burnTimeFor {              // seconds to spend dvNeed at full throttle
 // Translational acceleration the RCS can produce, in m/s^2.  Counted off the
 // blocks actually installed and the mass actually aboard, so a full cargo bay
 // gets a gentler approach without anyone retuning anything.  It is refined in
-// flight from what the thrusters really deliver - see approachAccel().
+// flight from what the thrusters really deliver - see rdvApproachAccel().
 SET rcsAccEst TO 0.15.
 
-FUNCTION rcsAccelNominal {
+FUNCTION rdvRcsAccelNominal {
   IF SHIP:MASS <= 0 { RETURN RCS_ACC_MIN. }
   RETURN MAX(RCS_ACC_MIN, RCS_BLOCKS * RCS_THRUST_BLOCK / SHIP:MASS).
 }
 
-FUNCTION approachAccel {            // the figure the braking schedule uses
+FUNCTION rdvApproachAccel {            // the figure the braking schedule uses
   RETURN MAX(RCS_ACC_MIN, rcsAccEst).
 }
 
@@ -531,7 +531,7 @@ FUNCTION approachAccel {            // the figure the braking schedule uses
 // tonnes of propellant are worth far more; reserving the post-delivery figure
 // against the pre-delivery gauge sets aside roughly twice the propellant the
 // burn will use, which is enough to price a reachable rendezvous out of reach.
-FUNCTION heavyEquivalentOf {
+FUNCTION rdvHeavyEquivalentOf {
   PARAMETER dvLight.
   IF NOT DEPLOY_BEFORE_DEORBIT OR payloadMass <= 1 { RETURN dvLight. }
   LOCAL vEx IS RKT_ISP * G0.
@@ -588,7 +588,7 @@ FUNCTION deorbitDvFromR {
 // What must still be in the tanks after the rendezvous is over.
 FUNCTION reserveDvAtR {
   PARAMETER rr.
-  RETURN MAX(DV_GLIDE_RESERVE, heavyEquivalentOf(deorbitDvFromR(rr) + DV_MARGIN)).
+  RETURN MAX(DV_GLIDE_RESERVE, rdvHeavyEquivalentOf(deorbitDvFromR(rr) + DV_MARGIN)).
 }
 
 // ---------------------------------------------------------------------------
@@ -769,7 +769,7 @@ FUNCTION nodeCrossAfter {
 FUNCTION phaseWaitFor {
   PARAMETER phiNow, phiWant, rateDeg.
   IF ABS(rateDeg) < 0.0000001 { RETURN -1. }
-  LOCAL dAng IS normAng(phiWant - phiNow).
+  LOCAL dAng IS rdvNormAng(phiWant - phiNow).
   IF rateDeg > 0 {
     IF dAng < 0 { SET dAng TO dAng + 360. }
   } ELSE {
@@ -794,8 +794,8 @@ FUNCTION execNode {
     PRINT "  " + label + ": nothing to burn (" + ROUND(dvWant, 2) + " m/s).".
     RETURN TRUE.
   }
-  goClosedCycle().
-  LOCAL burnDur IS burnTimeFor(dvWant).
+  rdvGoClosedCycle().
+  LOCAL burnDur IS rdvBurnTimeFor(dvWant).
   IF burnDur <= 0 { SET burnDur TO 30. }
 
   PRINT "  " + label + ": " + ROUND(dvWant, 1) + " m/s, " +
@@ -806,9 +806,9 @@ FUNCTION execNode {
   // the pilot has already chosen to go; refusing to start a burn here would
   // contradict that, and the in-burn floor below stops it at exactly the right
   // moment anyway.  ABORT_IF_INFEASIBLE is where "do not even start" lives.
-  IF rocketDv() < dvWant + floorDv {
+  IF rdvRocketDv() < dvWant + floorDv {
     PRINT "  !! " + label + " cannot be flown in full - " +
-          ROUND(rocketDv()) + " m/s aboard, " + ROUND(dvWant) + " wanted with " +
+          ROUND(rdvRocketDv()) + " m/s aboard, " + ROUND(dvWant) + " wanted with " +
           ROUND(floorDv) + " reserved. It will stop on the reserve.".
   }
 
@@ -848,10 +848,10 @@ FUNCTION execNode {
     LOCAL left IS ndIn:DELTAV:MAG.
     // Taper, so a burn that is nearly finished does not step past the target in
     // a single physics tick at full thrust.
-    IF left < 15 { SET thrCmd TO clampVal(left / 15, 0.05, 1). }
+    IF left < 15 { SET thrCmd TO rdvClampVal(left / 15, 0.05, 1). }
     IF left < 0.15 { SET burning TO FALSE. }
     IF VDOT(dv0, ndIn:DELTAV) < 0 { SET burning TO FALSE. }
-    IF rocketDv() <= floorDv {
+    IF rdvRocketDv() <= floorDv {
       SET burning TO FALSE.
       SET stopped TO "reserve".
     }
@@ -917,25 +917,25 @@ FUNCTION nodePredictionWorks {
 // ---------------------------------------------------------------------------
 SET logStarted TO FALSE.
 
-FUNCTION resourceReport {
+FUNCTION rdvResourceReport {
   PARAMETER label.
-  LOCAL lfAmt   IS coreResAmt("LiquidFuel").
-  LOCAL oxAmt   IS coreResAmt("Oxidizer").
-  LOCAL monoAmt IS resAmtShip("MonoPropellant").
-  LOCAL ecAmt   IS resAmtShip("ElectricCharge").
+  LOCAL lfAmt   IS rdvCoreResAmt("LiquidFuel").
+  LOCAL oxAmt   IS rdvCoreResAmt("Oxidizer").
+  LOCAL monoAmt IS rdvResAmtShip("MonoPropellant").
+  LOCAL ecAmt   IS rdvResAmtShip("ElectricCharge").
   PRINT "------------------------------------------------------".
   PRINT "RESOURCES :: " + label.
   PRINT "  Mass  : " + ROUND(SHIP:MASS, 2) + " t" +
         "   (payload " + ROUND(payloadMass, 1) + " t)".
   PRINT "  LF/Ox : " + ROUND(lfAmt, 1) + " / " + ROUND(oxAmt, 1) +
-        " u   ->  " + ROUND(rocketDv()) + " m/s".
-  PRINT "  Mono  : " + ROUND(monoAmt, 1) + " u   ->  " + ROUND(monoDv(), 1) +
+        " u   ->  " + ROUND(rdvRocketDv()) + " m/s".
+  PRINT "  Mono  : " + ROUND(monoAmt, 1) + " u   ->  " + ROUND(rdvMonoDv(), 1) +
         " m/s on RCS".
   PRINT "  EC    : " + ROUND(ecAmt, 1) + " u".
   IF PAY_TANKS:LENGTH > 0 {
     PRINT "  Payload LF/Ox (not counted): " +
-          ROUND(listResAmt(PAY_TANKS, "LiquidFuel"), 1) + " / " +
-          ROUND(listResAmt(PAY_TANKS, "Oxidizer"), 1) + " u".
+          ROUND(rdvListResAmt(PAY_TANKS, "LiquidFuel"), 1) + " / " +
+          ROUND(rdvListResAmt(PAY_TANKS, "Oxidizer"), 1) + " u".
   }
   PRINT "------------------------------------------------------".
 
@@ -946,12 +946,12 @@ FUNCTION resourceReport {
     }
     LOG ROUND(TIME:SECONDS, 1) + "," + label + "," + ROUND(SHIP:MASS, 3) + "," +
         ROUND(lfAmt, 2) + "," + ROUND(oxAmt, 2) + "," + ROUND(monoAmt, 2) + "," +
-        ROUND(ecAmt, 2) + "," + ROUND(rocketDv(), 1) + "," +
-        ROUND(monoDv(), 1) TO LOG_PATH.
+        ROUND(ecAmt, 2) + "," + ROUND(rdvRocketDv(), 1) + "," +
+        ROUND(rdvMonoDv(), 1) TO LOG_PATH.
   }
 }
 
-FUNCTION handBack {
+FUNCTION rdvHandBack {
   LOCK THROTTLE TO 0.
   UNLOCK THROTTLE.
   UNLOCK STEERING.
@@ -993,7 +993,7 @@ IF targetName = "" {
     // backslash, so \" ends the string early and the file fails to compile.
     // A literal double quote is written by doubling it.
     PRINT "   RUN rendezvous(""Station Alpha"").".
-    handBack().
+    rdvHandBack().
     PRINT "Nothing to rendezvous with - stopping.".
   }
 } ELSE {
@@ -1023,7 +1023,7 @@ IF targetName = "" {
   } ELSE {
     PRINT "!! No vessel matching """ + targetName + """ is in flight.".
   }
-  IF NOT tgtFound { handBack(). }
+  IF NOT tgtFound { rdvHandBack(). }
 }
 
 IF tgtFound {
@@ -1049,16 +1049,16 @@ IF tgtFound {
   }
 
   IF tgtOk {
-    SET RKT_ISP TO measureRocketIsp().
-    SET rcsAccEst TO rcsAccelNominal().
-    goClosedCycle().
+    SET RKT_ISP TO rdvMeasureRocketIsp().
+    SET rcsAccEst TO rdvRcsAccelNominal().
+    rdvGoClosedCycle().
 
     IF ISOLATE_PAYLOAD AND PAY_TANKS:LENGTH > 0 {
-      SET blockedN TO blockCrossfeed().
+      SET blockedN TO rdvBlockCrossfeed().
       IF blockedN > 0 {
         PRINT "Payload isolated: crossfeed blocked on " + blockedN + " separator(s).".
       } ELSE IF FORCE_TANK_LOCK {
-        PRINT "Payload isolated: flow disabled on " + lockPayloadTanks() +
+        PRINT "Payload isolated: flow disabled on " + rdvLockPayloadTanks() +
               " payload tank(s) - RE-ENABLE THEM ON DEPLOY.".
       }
     }
@@ -1081,7 +1081,7 @@ IF tgtFound {
           " deg (positive = target ahead)".
 
     // The resource log you asked for, taken before a single drop is spent.
-    resourceReport("before rendezvous").
+    rdvResourceReport("before rendezvous").
 
     // --- 0c. Plane change ---------------------------------------------------
     SET diRel     TO relIncDeg().
@@ -1124,7 +1124,7 @@ IF tgtFound {
     // are the corrections and the arrival burn, neither of which the closed-
     // form transfer dV covers.
     SET reserveDv TO reserveDvAtR(rTgt).
-    SET haveDv    TO rocketDv().
+    SET haveDv    TO rdvRocketDv().
     SET fixedDv   TO planeDv + CORR_DV_ALLOW + ARRIVE_DV_ALLOW + reserveDv.
 
     SET bestR  TO 0.
@@ -1168,7 +1168,7 @@ IF tgtFound {
         IF sameOrbit { SET phiArr TO phiNow. }
 
         LOCAL tTrans IS hohmannTime(rP, rTgt).
-        LOCAL phiReq IS normAng(180 - omegaT * tTrans).
+        LOCAL phiReq IS rdvNormAng(180 - omegaT * tTrans).
         LOCAL omegaP IS 360 / orbPeriodAtR(rP).
         LOCAL waitT  IS phaseWaitFor(phiArr, phiReq, omegaT - omegaP).
 
@@ -1276,7 +1276,7 @@ IF tgtFound {
     SET billDv    TO planeDv + bestDv + CORR_DV_ALLOW + ARRIVE_DV_ALLOW.
     IF rangeNow < NEAR_ALREADY { SET billDv TO 0. }
     SET needDv    TO billDv + reserveDv.
-    SET haveDv    TO rocketDv().
+    SET haveDv    TO rdvRocketDv().
 
     PRINT "======================================================".
     PRINT "RENDEZVOUS BUDGET".
@@ -1334,16 +1334,16 @@ IF tgtFound {
               " m/s of it; a wait fitting in this orbit would avoid it.".
       }
     }
-    IF monoDv() < termDv {
+    IF rdvMonoDv() < termDv {
       PRINT "  !! Monopropellant is short for the approach: " +
-            ROUND(monoDv(), 1) + " m/s aboard, " + ROUND(termDv) + " wanted.".
+            ROUND(rdvMonoDv(), 1) + " m/s aboard, " + ROUND(termDv) + " wanted.".
       PRINT "     The terminal phase will stop at MONO_RESERVE and hold.".
     }
     PRINT "======================================================".
 
     IF NOT feasible AND ABORT_IF_INFEASIBLE {
       PRINT "ABORT_IF_INFEASIBLE is set - staying in this orbit.".
-      handBack().
+      rdvHandBack().
       SET tgtOk TO FALSE.
     } ELSE IF NOT feasible {
       // Setting off is not the same as committing.  The plane change and the
@@ -1392,8 +1392,8 @@ IF tgtFound {
         //  terminated on the thing it is actually for: the relative inclination
         //  itself, stopped the moment it stops falling.  Burning to a fixed dV
         //  would trust the arithmetic; this checks it.
-        goClosedCycle().
-        SET burnDur TO burnTimeFor(planeDv).
+        rdvGoClosedCycle().
+        SET burnDur TO rdvBurnTimeFor(planeDv).
         SET tStart  TO tNode - burnDur / 2.
         PRINT "  " + ROUND(planeDv, 1) + " m/s at the node, " +
               ROUND(burnDur, 1) + " s, T-" +
@@ -1426,8 +1426,8 @@ IF tgtFound {
           // Past the bottom: every further second is spending fuel to build the
           // relative inclination back up on the far side.
           IF diNow > diBest + 0.02 { SET burningPlane TO FALSE. }
-          IF diNow < 0.5 { SET thrCmd TO clampVal(diNow / 0.5, 0.05, 1). }
-          IF rocketDv() <= reserveDv { SET burningPlane TO FALSE. SET goOn TO FALSE. }
+          IF diNow < 0.5 { SET thrCmd TO rdvClampVal(diNow / 0.5, 0.05, 1). }
+          IF rdvRocketDv() <= reserveDv { SET burningPlane TO FALSE. SET goOn TO FALSE. }
           IF TIME:SECONDS > tPlaneEnd { SET burningPlane TO FALSE. }
           IF SHIP:AVAILABLETHRUST <= 0 { SET burningPlane TO FALSE. SET goOn TO FALSE. }
           WAIT 0.02.
@@ -1495,7 +1495,7 @@ IF tgtFound {
     IF goOn AND NOT skipTransfer {
       SET rPhase TO BODY_R + SHIP:ALTITUDE.
       SET tTrans TO hohmannTime(rPhase, rTgt).
-      SET phiReq TO normAng(180 - omegaT * tTrans).
+      SET phiReq TO rdvNormAng(180 - omegaT * tTrans).
       SET rateNow TO omegaT - 360 / SHIP:OBT:PERIOD.
       SET waitT TO phaseWaitFor(phaseAngleAt(TIME:SECONDS), phiReq, rateNow).
       IF waitT < 0 {
@@ -1648,7 +1648,7 @@ IF tgtFound {
       //  the ship had to do it.  The reserve is defended here, by not going,
       //  rather than at the far end by cutting the arrival burn short.
       SET arrCost TO relVelAt(caNow["t"]) + ARRIVE_DV_FLOOR.
-      SET dvAfter TO rocketDv() - ndX:DELTAV:MAG - reserveDv.
+      SET dvAfter TO rdvRocketDv() - ndX:DELTAV:MAG - reserveDv.
       IF dvAfter < arrCost {
         PRINT "  !! NOT COMMITTING to this transfer.".
         PRINT "     The injection costs " + ROUND(ndX:DELTAV:MAG) +
@@ -1753,11 +1753,11 @@ IF tgtFound {
 
       // This is the reading you want in the log: everything above is transfer,
       // everything below is rendezvous, and this is the line between them.
-      resourceReport("at intercept, before the approach").
+      rdvResourceReport("at intercept, before the approach").
 
       PRINT "  Nulling relative velocity (" +
             ROUND((SHIP:VELOCITY:ORBIT - tgtVes:VELOCITY:ORBIT):MAG, 1) + " m/s).".
-      goClosedCycle().
+      rdvGoClosedCycle().
       LOCK STEERING TO LOOKDIRUP(tgtVes:VELOCITY:ORBIT - SHIP:VELOCITY:ORBIT,
                                  SHIP:UP:VECTOR).
       SET tKill TO TIME:SECONDS + 300.
@@ -1777,10 +1777,10 @@ IF tgtFound {
         SET vRelMag TO (SHIP:VELOCITY:ORBIT - tgtVes:VELOCITY:ORBIT):MAG.
         SET gapKill TO MAX(0, (tgtVes:POSITION):MAG - PARK_DIST).
         SET vHandover TO MIN(RCS_HANDOVER,
-                             SQRT(2 * approachAccel() * gapKill / BRAKE_SAFETY)).
+                             SQRT(2 * rdvApproachAccel() * gapKill / BRAKE_SAFETY)).
         IF vRelMag <= vHandover { SET killing TO FALSE. SET thrCmd TO 0. }
         ELSE IF TIME:SECONDS > tKill { SET killing TO FALSE. SET thrCmd TO 0. }
-        ELSE IF rocketDv() <= reserveDv {
+        ELSE IF rdvRocketDv() <= reserveDv {
           SET killing TO FALSE.
           SET thrCmd TO 0.
           PRINT "  !! Arrival burn stopped on the reserve with " +
@@ -1791,7 +1791,7 @@ IF tgtFound {
           // new miss distance.
           IF VANG(SHIP:FACING:VECTOR,
                   tgtVes:VELOCITY:ORBIT - SHIP:VELOCITY:ORBIT) < ALIGN_TOL {
-            SET thrCmd TO clampVal(vRelMag / 20, 0.05, 1).
+            SET thrCmd TO rdvClampVal(vRelMag / 20, 0.05, 1).
           } ELSE {
             SET thrCmd TO 0.
           }
@@ -1888,12 +1888,12 @@ IF tgtFound {
         // again, so a drift inward is station-keeping rather than a slow
         // collision nobody commanded.
         LOCAL gapSig IS dist - PARK_DIST.
-        LOCAL vCap   IS SQRT(2 * approachAccel() * ABS(gapSig) / BRAKE_SAFETY).
+        LOCAL vCap   IS SQRT(2 * rdvApproachAccel() * ABS(gapSig) / BRAKE_SAFETY).
         LOCAL vCmd   IS 0.
         IF gapSig > PARK_BAND {
-          SET vCmd TO MAX(V_CLOSE_MIN, clampVal(vCap, 0, V_CLOSE_MAX)).
+          SET vCmd TO MAX(V_CLOSE_MIN, rdvClampVal(vCap, 0, V_CLOSE_MAX)).
         } ELSE IF gapSig < -PARK_BAND {
-          SET vCmd TO -MIN(V_CLOSE_MIN, clampVal(vCap, 0, V_CLOSE_MAX)).
+          SET vCmd TO -MIN(V_CLOSE_MIN, rdvClampVal(vCap, 0, V_CLOSE_MAX)).
         }
 
         // Can the ship still stop at all?  Closing speed squared against twice
@@ -1904,7 +1904,7 @@ IF tgtFound {
         // the station while its thrusters do their conscientious best.
         LOCAL vClose IS VDOT(vOurs, losHat).
         IF vClose > 0 AND gapSig > 0 AND
-           vClose * vClose > 2 * approachAccel() * gapSig {
+           vClose * vClose > 2 * rdvApproachAccel() * gapSig {
           IF NOT brakeHard {
             PRINT "  !! Closing at " + ROUND(vClose, 1) + " m/s with " +
                   ROUND(gapSig) + " m to stop in - RCS cannot. Main engine.".
@@ -1912,7 +1912,7 @@ IF tgtFound {
           SET brakeHard TO TRUE.
           SET vCmd TO 0.
         } ELSE IF brakeHard AND
-                  vClose * vClose < 2 * approachAccel() * gapSig * 0.5 {
+                  vClose * vClose < 2 * rdvApproachAccel() * gapSig * 0.5 {
           // Hysteresis: come off the main engine only once there is real room
           // in hand, or the two modes will chatter against each other.
           PRINT "  Back inside the RCS braking envelope.".
@@ -1922,9 +1922,9 @@ IF tgtFound {
 
         IF brakeHard {
           SET vCmd TO 0.
-          IF rocketDv() > reserveDv AND
+          IF rdvRocketDv() > reserveDv AND
              VANG(SHIP:FACING:VECTOR, approachSteer()) < ALIGN_TOL {
-            SET thrCmd TO clampVal(vClose / 20, 0.05, 1).
+            SET thrCmd TO rdvClampVal(vClose / 20, 0.05, 1).
           } ELSE {
             SET thrCmd TO 0.
           }
@@ -1933,7 +1933,7 @@ IF tgtFound {
           // happen whatever this loop does next.  Stop here with the mono still
           // aboard, because after the pass it is the only thing that can hold
           // the ship anywhere at all.
-          IF rocketDv() <= reserveDv AND
+          IF rdvRocketDv() <= reserveDv AND
              monoDvUsable() < ABS(vClose) * TERM_V_MARGIN {
             SET closing TO FALSE.
             SET whyStop TO "unstoppable".
@@ -1953,9 +1953,9 @@ IF tgtFound {
         IF ABS(fCmd) < TRANS_DEAD { SET fCmd TO 0. }
         IF ABS(sCmd) < TRANS_DEAD { SET sCmd TO 0. }
         IF ABS(tCmd) < TRANS_DEAD { SET tCmd TO 0. }
-        SET SHIP:CONTROL:FORE      TO clampVal(fCmd, -1, 1).
-        SET SHIP:CONTROL:STARBOARD TO clampVal(sCmd, -1, 1).
-        SET SHIP:CONTROL:TOP       TO clampVal(tCmd, -1, 1).
+        SET SHIP:CONTROL:FORE      TO rdvClampVal(fCmd, -1, 1).
+        SET SHIP:CONTROL:STARBOARD TO rdvClampVal(sCmd, -1, 1).
+        SET SHIP:CONTROL:TOP       TO rdvClampVal(tCmd, -1, 1).
         IF ABS(fCmd) > 0.95 OR ABS(sCmd) > 0.95 OR ABS(tCmd) > 0.95 {
           SET lastFull TO TRUE.
         }
@@ -1967,7 +1967,7 @@ IF tgtFound {
           SET parkedAt TO 0.
         }
 
-        IF resAmtShip("MonoPropellant") < MONO_RESERVE {
+        IF rdvResAmtShip("MonoPropellant") < MONO_RESERVE {
           SET closing TO FALSE.
           SET whyStop TO "mono".
         }
@@ -2028,12 +2028,12 @@ IF tgtFound {
     PRINT "  Rel inc    : " + ROUND(relIncDeg(), 4) + " deg".
 
     IF distFin < PARK_DIST + PARK_BAND * 4 AND vRelFin < 1 {
-      resourceReport("parked, rendezvous complete").
+      rdvResourceReport("parked, rendezvous complete").
     } ELSE {
-      resourceReport("rendezvous incomplete").
+      rdvResourceReport("rendezvous incomplete").
     }
 
-    SET dvNow  TO rocketDv().
+    SET dvNow  TO rdvRocketDv().
     SET dvHome TO reserveDvAtR(BODY_R + SHIP:ALTITUDE).
     PRINT "  dV left    : " + ROUND(dvNow) + " m/s".
     PRINT "  Deorbit    : needs " + ROUND(dvHome) +
@@ -2057,12 +2057,12 @@ IF tgtFound {
       PRINT "shortfall above and RUN rendezvous. again from here.".
     }
 
-    handBack().
+    rdvHandBack().
     RCS ON.
   }
 
   // Every path that stopped early - wrong body, retrograde target, suborbital,
   // or a refused budget - lands here.  Leaving the IPU raised and the throttle
   // locked after the program ends is how a pilot finds the stick dead.
-  IF NOT tgtOk { handBack(). }
+  IF NOT tgtOk { rdvHandBack(). }
 }
